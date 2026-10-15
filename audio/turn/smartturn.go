@@ -173,43 +173,10 @@ func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, float64, error) 
 	return Incomplete, prob, nil
 }
 
-// SmartTurnModel is a thread-safe, reusable ONNX session holding the loaded
-// smart-turn-v3 model. It can be shared across multiple concurrent SmartTurnV3
-// analyzers to avoid loading duplicate model instances and oversubscribing
-// thread pools.
-type SmartTurnModel struct {
-	session *onnxrt.Session
-}
-
-// NewSmartTurnModel loads the embedded smart-turn-v3 model into a reusable session.
-func NewSmartTurnModel(opts ...onnxrt.Options) (*SmartTurnModel, error) {
-	opt := onnxrt.Options{IntraOpThreads: 1}
-	if len(opts) > 0 {
-		opt = opts[0]
-	}
-	session, err := onnxrt.NewWithOptions(smartTurnModel,
-		[]string{"input_features"}, []string{"logits"}, opt)
-	if err != nil {
-		return nil, fmt.Errorf("turn: load Smart Turn model: %w", err)
-	}
-	return &SmartTurnModel{session: session}, nil
-}
-
-// Close releases the shared model session.
-func (m *SmartTurnModel) Close() error {
-	if m == nil || m.session == nil {
-		return nil
-	}
-	err := m.session.Close()
-	m.session = nil
-	return err
-}
-
 // SmartTurnV3 is an end-of-turn Analyzer backed by the smart-turn-v3 ONNX model.
 type SmartTurnV3 struct {
 	*smartTurnBase
-	session       *onnxrt.Session
-	sharedSession bool
+	session *onnxrt.Session
 }
 
 // TurnOption configures a SmartTurnV3 analyzer.
@@ -239,24 +206,6 @@ func NewSmartTurnV3(opts ...TurnOption) (*SmartTurnV3, error) {
 	}
 
 	s := &SmartTurnV3{session: session}
-	s.smartTurnBase = newSmartTurnBase(s, params)
-	return s, nil
-}
-
-// NewSmartTurnV3WithModel returns a SmartTurnV3 analyzer that reuses a shared
-// SmartTurnModel session instead of instantiating its own.
-func NewSmartTurnV3WithModel(m *SmartTurnModel, opts ...TurnOption) (*SmartTurnV3, error) {
-	if m == nil || m.session == nil {
-		return nil, errors.New("turn: shared SmartTurnModel cannot be nil")
-	}
-	params := DefaultParams()
-	for _, opt := range opts {
-		opt(&params)
-	}
-	s := &SmartTurnV3{
-		session:       m.session,
-		sharedSession: true,
-	}
 	s.smartTurnBase = newSmartTurnBase(s, params)
 	return s, nil
 }
@@ -293,10 +242,9 @@ func (s *SmartTurnV3) runModel(features []float32) (float64, error) {
 	return float64(outs[0].F32[0]), nil
 }
 
-// Close releases the model session if it is owned by this analyzer.
-// Analyzers sharing a model session do not close the underlying session.
+// Close releases the model session.
 func (s *SmartTurnV3) Close() error {
-	if s.session == nil || s.sharedSession {
+	if s.session == nil {
 		return nil
 	}
 	err := s.session.Close()

@@ -185,3 +185,47 @@ func TestSileroSharedModelConcurrency(t *testing.T) {
 		}
 	}
 }
+
+func TestSileroModelEdgeCases(t *testing.T) {
+	if !onnxrt.Available() {
+		t.Skip("ONNX runtime not configured; set JARGO_ONNXRUNTIME_LIB")
+	}
+
+	model, err := NewSileroModel(onnxrt.Options{IntraOpThreads: 1})
+	if err != nil {
+		t.Fatalf("NewSileroModel with opts: %v", err)
+	}
+
+	s, err := NewSilero(WithModel(model), WithParams(DefaultParams()))
+	if err != nil {
+		t.Fatalf("NewSilero with opts: %v", err)
+	}
+	_ = s.Close()
+
+	// NewSilero with empty or nil model gracefully falls back to dedicated session
+	sNil, err := NewSilero(WithModel(nil))
+	if err != nil {
+		t.Fatalf("NewSilero with nil model: %v", err)
+	}
+	_ = sNil.Close()
+
+	emptyModel := &SileroModel{}
+	sEmpty, err := NewSilero(WithModel(emptyModel))
+	if err != nil {
+		t.Fatalf("NewSilero with empty model: %v", err)
+	}
+	_ = sEmpty.Close()
+
+	var nilModel *SileroModel
+	if err := nilModel.Close(); err != nil {
+		t.Errorf("nilModel.Close(): %v", err)
+	}
+	if err := emptyModel.Close(); err != nil {
+		t.Errorf("emptyModel.Close(): %v", err)
+	}
+
+	if err := model.Close(); err != nil {
+		t.Errorf("model.Close(): %v", err)
+	}
+}
+
