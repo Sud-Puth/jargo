@@ -1091,13 +1091,14 @@ type AssistantAggregator struct {
 	// pushOnBotStopped records a deferred re-run, so several results arriving
 	// while the bot speaks are answered by a single inference once it stops.
 	pushOnBotStopped bool
-	// contextPushOwed records that a tool result asked to run inference and the
-	// push has not happened yet: it was held for results still queued, or for a
-	// user who is speaking. Whichever result is handled once the way is clear
-	// makes the push, whatever its own request says. A run that starts
-	// meanwhile, such as the one the user's turn brings, settles it, since that
-	// run sees the conversation as it stands. A user turn with nothing in it
-	// brings no run, so the push stays owed until the next arrival.
+	// contextPushOwed records that a tool result or an appended message asked to
+	// run inference and the push has not happened yet: it was held for results or
+	// appends still queued, or for a user who is speaking. Whichever result or
+	// append is handled once the way is clear makes the push, whatever its own
+	// request says. A run that starts meanwhile, such as the one the user's turn
+	// brings, settles it, since that run sees the conversation as it stands. A
+	// user turn with nothing in it brings no run, so the push stays owed until the
+	// next arrival.
 	contextPushOwed bool
 
 	// thought is the reasoning being streamed now, and the moment it began. A
@@ -1494,22 +1495,25 @@ func (a *AssistantAggregator) handleContextUpdate(ctx context.Context, f frames.
 // rather than at the user aggregator, and the run it asks for has to travel back
 // upstream to the service.
 //
+// A run it asks for is treated as a tool result's is: held while the bot speaks,
+// owed while the user speaks, and bundled with the appends and results queued
+// behind it. Run at once, a message appended mid-sentence would run the model on
+// a conversation that lacks the answer in progress, and the model would answer
+// it again.
+//
 // The frame is consumed, like its counterpart on the user side, so a
 // conversation both halves share is never appended to twice.
 func (a *AssistantAggregator) handleMessagesAppend(ctx context.Context, fr *frames.LLMMessagesAppendFrame) error {
 	for _, m := range fr.Messages {
 		a.context.AddMessage(m)
 	}
-	if !fr.RunLLM {
-		return nil
-	}
-	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
+	return a.settleRunRequest(ctx, fr.RunLLM)
 }
 
-// settleRunRequest records a request to run inference from a tool result, and
-// makes the push if one is owed and the user does not hold the floor. A push
-// owed while the user speaks waits: the run their turn brings settles it, or
-// else the next result to arrive makes it.
+// settleRunRequest records a request to run inference from a tool result or an
+// appended message, and makes the push if one is owed and the user does not
+// hold the floor. A push owed while the user speaks waits: the run their turn
+// brings settles it, or else the next result or append to arrive makes it.
 func (a *AssistantAggregator) settleRunRequest(ctx context.Context, runLLM bool) error {
 	a.mu.Lock()
 	if runLLM {
@@ -1657,7 +1661,7 @@ func (a *AssistantAggregator) handleFunctionCallResult(
 		a.recordIntermediateResult(ctx, fr)
 	}
 
-	// A push owed by an earlier result is made here once the way is
+	// A push owed by an earlier result or append is made here once the way is
 	// clear, whether or not this result asks to run: a burst can end with an
 	// intermediate result, or one that declines, and the run asked for earlier in
 	// it must not be lost.
@@ -1854,18 +1858,19 @@ func (a *AssistantAggregator) handleFunctionCallCancel(
 }
 
 // maybePushContext re-runs generation on the updated context after a tool call
-// settles, unless doing so now would produce an answer that another result is
-// about to make stale, or one spoken over the bot's current turn.
+// settles or a message is appended, unless doing so now would produce an answer
+// that another result or append is about to make stale, or one spoken over the
+// bot's current turn.
 //
 // A cascaded LLM reads the new result out of the context frame; a realtime
 // service reads it out of the context the same way, since neither is handed the
 // result frame itself. The push is what carries the result to the model in both.
 func (a *AssistantAggregator) maybePushContext(ctx context.Context) error {
-	if a.HasQueuedFrame(isFunctionCallResult) {
-		// More results are already on their way. Leaving the push to the last of
-		// them answers the whole batch with one inference instead of one each.
-		// The push stays owed until it happens, so the last result makes it
-		// whether or not that result asks to run.
+	if a.HasQueuedFrame(isResultOrAppend) {
+		// More results or appends are already on their way. Leaving the push to
+		// the last of them answers the whole batch with one inference instead of
+		// one each. The push stays owed until it happens, so the last frame makes
+		// it whether or not that frame asks to run.
 		return nil
 	}
 
@@ -1958,11 +1963,14 @@ func quoteNames(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// isFunctionCallResult reports whether f is a tool result, for the queue check
-// above.
-func isFunctionCallResult(f frames.Frame) bool {
-	_, ok := f.(*frames.FunctionCallResultFrame)
-	return ok
+// isResultOrAppend reports whether f is a tool result or an appended message,
+// for the queue check above.
+func isResultOrAppend(f frames.Frame) bool {
+	switch f.(type) {
+	case *frames.FunctionCallResultFrame, *frames.LLMMessagesAppendFrame:
+		return true
+	}
+	return false
 }
 
 // pushContextFrame pushes the current context in dir: upstream it runs

@@ -13,10 +13,10 @@ import (
 	"github.com/gojargo/jargo/utils/events"
 )
 
-// Tests for the run a tool result asks for when the push cannot be made at once.
-// A push held for frames still queued, or for a user who is speaking, is owed:
-// the next result to find the way clear makes it whatever it asks itself, and a
-// response starting settles it.
+// Tests for the run a tool result or an appended message asks for when the push
+// cannot be made at once. A push held for frames still queued, or for a user who
+// is speaking, is owed: the next result or append to find the way clear makes it
+// whatever it asks itself, and a response starting settles it.
 //
 // Ported from upstream's assistant-aggregator suite.
 
@@ -113,6 +113,26 @@ func (h *assistantHarness) queueTogether(t *testing.T, fs ...frames.Frame) {
 	h.assistant.ResumeProcessingFrames()
 }
 
+// awaitMessageCount waits for the conversation to hold n messages, which is how
+// a test knows a data frame was handled before it sends a system frame that
+// would otherwise overtake it.
+func awaitMessageCount(t *testing.T, convo *frames.LLMContext, n int) {
+	t.Helper()
+	if !waitFor(3*time.Second, func() bool { return len(convo.Messages()) == n }) {
+		t.Fatalf("conversation = %+v, want %d messages", convo.Messages(), n)
+	}
+}
+
+func developer(text string) []frames.Message {
+	return []frames.Message{{Role: frames.RoleDeveloper, Text: text}}
+}
+
+func appendFrame(text string, run bool) *frames.LLMMessagesAppendFrame {
+	f := frames.NewLLMMessagesAppendFrame(developer(text))
+	f.RunLLM = run
+	return f
+}
+
 // TestRunSurvivesALaterResultThatDoesNotAskToRun is upstream's
 // test_run_survives_a_later_result_that_does_not_ask_to_run: a burst runs
 // inference once, even when its last result does not ask for it.
@@ -180,5 +200,103 @@ func TestResultOwedThroughAnEmptyUserTurnIsPushedOnTheNextArrival(t *testing.T) 
 	settle()
 	if got := h.generations(); got != 1 {
 		t.Errorf("generation ran %d times, want 1", got)
+	}
+}
+
+// TestAnAppendAskingToRunWaitsForTheBotToStopSpeaking is upstream's
+// test_an_append_asking_to_run_waits_for_the_bot_to_stop_speaking. Run
+// mid-sentence, the model would answer a conversation that lacks its answer in
+// progress.
+func TestAnAppendAskingToRunWaitsForTheBotToStopSpeaking(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.task.QueueFrame(frames.NewBotStartedSpeakingFrame())
+	h.task.QueueFrame(appendFrame("Backend: the coffee order is ready.", true))
+	awaitMessageCount(t, convo, 1)
+	settle()
+	if got := h.generations(); got != 0 {
+		t.Fatalf("generation ran %d times while the bot was speaking, want 0", got)
+	}
+
+	h.task.QueueFrame(frames.NewBotStoppedSpeakingFrame())
+	awaitCount(t, h.generations, 1, "the bot having stopped")
+	settle()
+	if got := h.generations(); got != 1 {
+		t.Errorf("generation ran %d times, want 1", got)
+	}
+}
+
+// TestAnAppendAskingToRunWhileTheUserSpeaksIsSettledByTheTurnsRun is upstream's
+// test_an_append_asking_to_run_while_the_user_speaks_is_settled_by_the_turns_run:
+// the run the user's turn brings sees the conversation as it stands, so nothing
+// is owed after it.
+func TestAnAppendAskingToRunWhileTheUserSpeaksIsSettledByTheTurnsRun(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	h.task.QueueFrame(appendFrame("Backend: done.", true))
+	awaitMessageCount(t, convo, 1)
+
+	h.task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
+	h.task.QueueFrame(frames.NewLLMFullResponseStartFrame())
+	h.task.QueueFrame(frames.NewLLMFullResponseEndFrame())
+	h.task.QueueFrame(appendFrame("Backend (thinking): ...", false))
+	awaitMessageCount(t, convo, 2)
+	settle()
+
+	if got := h.generations(); got != 0 {
+		t.Errorf("generation ran %d times after the turn's own run had started, want 0", got)
+	}
+}
+
+// TestAnAppendOwedThroughAnEmptyUserTurnIsPushedOnTheNextArrival is upstream's
+// test of the same name: a user turn with nothing in it brings no run, so the
+// push is still owed and the next append makes it.
+func TestAnAppendOwedThroughAnEmptyUserTurnIsPushedOnTheNextArrival(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	h.task.QueueFrame(appendFrame("Backend: done.", true))
+	awaitMessageCount(t, convo, 1)
+	settle()
+	if got := h.generations(); got != 0 {
+		t.Fatalf("generation ran %d times while the user was speaking, want 0", got)
+	}
+
+	h.task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
+	settle()
+	h.task.QueueFrame(appendFrame("Backend (thinking): ...", false))
+	awaitMessageCount(t, convo, 2)
+
+	awaitCount(t, h.generations, 1, "the append after an empty user turn")
+	settle()
+	if got := h.generations(); got != 1 {
+		t.Errorf("generation ran %d times, want 1", got)
+	}
+}
+
+// TestAppendsQueuedTogetherRunInferenceOnce is upstream's
+// test_appends_queued_together_run_inference_once: a burst of messages is one
+// run, whatever the last one asks.
+func TestAppendsQueuedTogetherRunInferenceOnce(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.queueTogether(t,
+		appendFrame("Backend: one.", true),
+		appendFrame("Backend: two.", true),
+		appendFrame("Backend (thinking): three.", false),
+	)
+
+	awaitCount(t, h.generations, 1, "a burst of appends")
+	settle()
+	if got := h.generations(); got != 1 {
+		t.Errorf("generation ran %d times for one burst, want 1", got)
+	}
+	if got := len(convo.Messages()); got != 3 {
+		t.Errorf("conversation holds %d messages, want 3", got)
 	}
 }
