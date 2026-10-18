@@ -1091,6 +1091,14 @@ type AssistantAggregator struct {
 	// pushOnBotStopped records a deferred re-run, so several results arriving
 	// while the bot speaks are answered by a single inference once it stops.
 	pushOnBotStopped bool
+	// contextPushOwed records that a tool result asked to run inference and the
+	// push has not happened yet: it was held for results still queued, or for a
+	// user who is speaking. Whichever result is handled once the way is clear
+	// makes the push, whatever its own request says. A run that starts
+	// meanwhile, such as the one the user's turn brings, settles it, since that
+	// run sees the conversation as it stands. A user turn with nothing in it
+	// brings no run, so the push stays owed until the next arrival.
+	contextPushOwed bool
 
 	// thought is the reasoning being streamed now, and the moment it began. A
 	// thought is kept apart from the turn's own text: it is the model reasoning
@@ -1205,6 +1213,11 @@ func (a *AssistantAggregator) route(ctx context.Context, f frames.Frame, dir pro
 	case *frames.LLMServiceMetadataFrame:
 		a.noteRealtimeService(fr)
 	case *frames.LLMFullResponseStartFrame:
+		// A new response is the run an owed push was waiting for: it reads the
+		// conversation as it stands, so nothing is owed after it.
+		a.mu.Lock()
+		a.contextPushOwed = false
+		a.mu.Unlock()
 		// A realtime service delivers the user's transcript late, sometimes only
 		// once it has begun answering, so the answer starting is what stands in
 		// for the end of the user's turn where the conversation is written.
@@ -1493,6 +1506,23 @@ func (a *AssistantAggregator) handleMessagesAppend(ctx context.Context, fr *fram
 	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
 }
 
+// settleRunRequest records a request to run inference from a tool result, and
+// makes the push if one is owed and the user does not hold the floor. A push
+// owed while the user speaks waits: the run their turn brings settles it, or
+// else the next result to arrive makes it.
+func (a *AssistantAggregator) settleRunRequest(ctx context.Context, runLLM bool) error {
+	a.mu.Lock()
+	if runLLM {
+		a.contextPushOwed = true
+	}
+	push := a.contextPushOwed && !a.userSpeaking
+	a.mu.Unlock()
+	if !push {
+		return nil
+	}
+	return a.maybePushContext(ctx)
+}
+
 // handleMessagesUpdate replaces the conversation from this side of the pipeline,
 // and runs the model on it when asked.
 func (a *AssistantAggregator) handleMessagesUpdate(ctx context.Context, fr *frames.LLMMessagesUpdateFrame) error {
@@ -1500,7 +1530,7 @@ func (a *AssistantAggregator) handleMessagesUpdate(ctx context.Context, fr *fram
 	if !fr.RunLLM {
 		return nil
 	}
-	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
+	return a.pushContextFrame(ctx, processor.Upstream)
 }
 
 // handleMessagesTransform rewrites the conversation from this side of the
@@ -1512,7 +1542,7 @@ func (a *AssistantAggregator) handleMessagesTransform(
 	if !fr.RunLLM {
 		return nil
 	}
-	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
+	return a.pushContextFrame(ctx, processor.Upstream)
 }
 
 // handleText folds one piece of the turn's text into the aggregation. original
@@ -1627,15 +1657,12 @@ func (a *AssistantAggregator) handleFunctionCallResult(
 		a.recordIntermediateResult(ctx, fr)
 	}
 
-	if a.shouldRunLLM(fr, props, groupID) {
-		a.mu.Lock()
-		speaking := a.userSpeaking
-		a.mu.Unlock()
-		if !speaking {
-			if err := a.maybePushContextAfterFunctionResult(ctx); err != nil {
-				return err
-			}
-		}
+	// A push owed by an earlier result is made here once the way is
+	// clear, whether or not this result asks to run: a burst can end with an
+	// intermediate result, or one that declines, and the run asked for earlier in
+	// it must not be lost.
+	if err := a.settleRunRequest(ctx, a.shouldRunLLM(fr, props, groupID)); err != nil {
+		return err
 	}
 
 	// The callback is told the context now holds the result. It runs off the
@@ -1823,20 +1850,22 @@ func (a *AssistantAggregator) handleFunctionCallCancel(
 	if groupID != "" && a.groupStillRunning(groupID, fr.ToolCallID) {
 		return nil
 	}
-	return a.maybePushContextAfterFunctionResult(ctx)
+	return a.maybePushContext(ctx)
 }
 
-// maybePushContextAfterFunctionResult re-runs generation on the updated context,
-// unless doing so now would produce an answer that another result is about to
-// make stale, or one spoken over the bot's current turn.
+// maybePushContext re-runs generation on the updated context after a tool call
+// settles, unless doing so now would produce an answer that another result is
+// about to make stale, or one spoken over the bot's current turn.
 //
 // A cascaded LLM reads the new result out of the context frame; a realtime
 // service reads it out of the context the same way, since neither is handed the
 // result frame itself. The push is what carries the result to the model in both.
-func (a *AssistantAggregator) maybePushContextAfterFunctionResult(ctx context.Context) error {
+func (a *AssistantAggregator) maybePushContext(ctx context.Context) error {
 	if a.HasQueuedFrame(isFunctionCallResult) {
 		// More results are already on their way. Leaving the push to the last of
 		// them answers the whole batch with one inference instead of one each.
+		// The push stays owed until it happens, so the last result makes it
+		// whether or not that result asks to run.
 		return nil
 	}
 
@@ -1938,10 +1967,11 @@ func isFunctionCallResult(f frames.Frame) bool {
 
 // pushContextFrame pushes the current context in dir: upstream it runs
 // generation, downstream it announces the conversation as it now stands. Either
-// way it clears any deferred push, since this one covers it.
+// way it clears any deferred or owed push, since this one covers it.
 func (a *AssistantAggregator) pushContextFrame(ctx context.Context, dir processor.Direction) error {
 	a.mu.Lock()
 	a.pushOnBotStopped = false
+	a.contextPushOwed = false
 	a.mu.Unlock()
 	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), dir)
 }
@@ -2069,18 +2099,19 @@ func (a *AssistantAggregator) pushAggregation(ctx context.Context) (string, erro
 	a.mu.Lock()
 	parts := a.aggregation
 	a.aggregation = nil
-	// This covers whatever a tool result deferred, so the deferred run is
-	// dropped rather than repeated behind it.
-	a.pushOnBotStopped = false
 	a.mu.Unlock()
 
 	said := text.Concatenate(parts)
 	if said == "" {
+		// Nothing was written and nothing is pushed, so a run a tool result
+		// deferred or owes is kept for whatever releases it.
 		return "", nil
 	}
 	a.context.AddAssistantMessage(said)
 
-	if err := a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Downstream); err != nil {
+	// This covers whatever a tool result deferred or owes, so that run is
+	// dropped rather than repeated behind it.
+	if err := a.pushContextFrame(ctx, processor.Downstream); err != nil {
 		return said, err
 	}
 	return said, a.PushFrame(ctx,
@@ -2103,6 +2134,7 @@ func (a *AssistantAggregator) commitInterrupted(ctx context.Context) error {
 	a.mu.Lock()
 	a.aggregation = nil
 	a.pushOnBotStopped = false
+	a.contextPushOwed = false
 	a.mu.Unlock()
 	return err
 }

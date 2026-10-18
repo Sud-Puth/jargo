@@ -13,6 +13,13 @@ import (
 	"github.com/gojargo/jargo/utils/events"
 )
 
+// Tests for the run a tool result asks for when the push cannot be made at once.
+// A push held for frames still queued, or for a user who is speaking, is owed:
+// the next result to find the way clear makes it whatever it asks itself, and a
+// response starting settles it.
+//
+// Ported from upstream's assistant-aggregator suite.
+
 // assistantHarness runs an assistant aggregator and records the context frames it
 // pushes upstream, which is how it asks for generation to run, and every frame
 // that reaches the end of the pipeline.
@@ -88,4 +95,90 @@ func (h *assistantHarness) downstream() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// queueTogether queues fs so the aggregator finds them waiting together, as a
+// burst arriving faster than it is handled would be: processing is paused until
+// the last of them is in the aggregator's queue.
+func (h *assistantHarness) queueTogether(t *testing.T, fs ...frames.Frame) {
+	t.Helper()
+	h.assistant.PauseProcessingFrames()
+	h.task.QueueFrames(fs)
+	last := fs[len(fs)-1]
+	if !waitFor(3*time.Second, func() bool {
+		return h.assistant.HasQueuedFrame(func(f frames.Frame) bool { return f == last })
+	}) {
+		t.Fatal("the burst never reached the aggregator's queue")
+	}
+	h.assistant.ResumeProcessingFrames()
+}
+
+// TestRunSurvivesALaterResultThatDoesNotAskToRun is upstream's
+// test_run_survives_a_later_result_that_does_not_ask_to_run: a burst runs
+// inference once, even when its last result does not ask for it.
+func TestRunSurvivesALaterResultThatDoesNotAskToRun(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.task.QueueFrame(frames.NewFunctionCallsStartedFrame([]frames.ToolCall{{ID: "1", Name: "lookup"}}))
+	h.task.QueueFrame(inProgressAsync("1", "lookup"))
+	if !waitFor(3*time.Second, func() bool { return len(asyncKinds(convo.Messages())) == 1 }) {
+		t.Fatalf("conversation = %+v, want the call started", convo.Messages())
+	}
+
+	// Queued together, so the first result's push is held for the second.
+	first := frames.NewFunctionCallResultFrame("1", "lookup", nil, `{"progress":"on it"}`)
+	first.Properties = &frames.FunctionCallResultProperties{IsFinal: new(false), RunLLM: new(true)}
+	second := frames.NewFunctionCallResultFrame("1", "lookup", nil, `{"progress":"still on it"}`)
+	second.Properties = &frames.FunctionCallResultProperties{IsFinal: new(false), RunLLM: new(false)}
+	h.queueTogether(t, first, second)
+
+	awaitCount(t, h.generations, 1, "a burst whose last result does not ask to run")
+	settle()
+	if got := h.generations(); got != 1 {
+		t.Errorf("generation ran %d times for one burst, want 1", got)
+	}
+}
+
+// TestResultOwedThroughAnEmptyUserTurnIsPushedOnTheNextArrival is the tool
+// result form of upstream's
+// test_an_append_owed_through_an_empty_user_turn_is_pushed_on_the_next_arrival: a
+// result asking to run while the user speaks is owed, a user turn with nothing
+// in it brings no run, and the next result makes the push though it declines to
+// run itself.
+func TestResultOwedThroughAnEmptyUserTurnIsPushedOnTheNextArrival(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	h := newAssistantHarness(t, convo)
+
+	h.task.QueueFrame(frames.NewFunctionCallsStartedFrame([]frames.ToolCall{
+		{ID: "1", Name: "check_stock"}, {ID: "2", Name: "check_price"},
+	}))
+	// No group, so each result asks to run on its own.
+	h.task.QueueFrame(frames.NewFunctionCallInProgressFrame("1", "check_stock", nil, true, ""))
+	h.task.QueueFrame(frames.NewFunctionCallInProgressFrame("2", "check_price", nil, true, ""))
+	if !waitFor(3*time.Second, func() bool { return len(toolResults(convo.Messages())) == 2 }) {
+		t.Fatalf("conversation = %+v, want both calls started", convo.Messages())
+	}
+
+	h.task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	h.task.QueueFrame(frames.NewFunctionCallResultFrame("1", "check_stock", nil, "in stock"))
+	if !waitFor(3*time.Second, func() bool {
+		return toolResults(convo.Messages())[0].Content == "in stock"
+	}) {
+		t.Fatalf("conversation = %+v, want the first result in place", convo.Messages())
+	}
+	settle()
+	if got := h.generations(); got != 0 {
+		t.Fatalf("generation ran %d times while the user was speaking, want 0", got)
+	}
+
+	h.task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
+	settle()
+	h.task.QueueFrame(noRun(frames.NewFunctionCallResultFrame("2", "check_price", nil, "4.50")))
+
+	awaitCount(t, h.generations, 1, "the result after an empty user turn")
+	settle()
+	if got := h.generations(); got != 1 {
+		t.Errorf("generation ran %d times, want 1", got)
+	}
 }
