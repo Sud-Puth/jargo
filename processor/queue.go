@@ -64,8 +64,14 @@ func (q *queue) push(it item) {
 // get returns the next item, blocking until one is available or ctx is done. It
 // reports ok=false only when ctx is canceled. The tiers are served in order:
 // the StartFrame, then the other system frames, then the rest.
+//
+// A canceled ctx wins over a waiting item. The consumer is canceled to stop it
+// at once, and an item handed out after that would be handled anyway.
 func (q *queue) get(ctx context.Context) (item, bool) {
 	for {
+		if ctx.Err() != nil {
+			return item{}, false
+		}
 		q.mu.Lock()
 		switch {
 		case len(q.start) > 0:
@@ -91,6 +97,19 @@ func (q *queue) get(ctx context.Context) (item, bool) {
 			return item{}, false
 		case <-q.notify:
 		}
+	}
+}
+
+// requeue puts a data or control item back at the head of its tier, for a
+// consumer that took it off and was stopped before it could handle it.
+func (q *queue) requeue(it item) {
+	q.mu.Lock()
+	q.other = append([]item{it}, q.other...)
+	q.mu.Unlock()
+
+	select {
+	case q.notify <- struct{}{}:
+	default:
 	}
 }
 

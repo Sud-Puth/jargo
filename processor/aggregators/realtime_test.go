@@ -111,6 +111,7 @@ func TestRealtimeWritesTheUserMessageWhenTheAnswerStarts(t *testing.T) {
 	// The turn happens with no transcript at all, which is the case this mode
 	// exists for.
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewVADUserStoppedSpeakingFrame(0.2, time.Now()))
 
 	// The transcript lands only as the service begins answering.
@@ -139,6 +140,7 @@ func TestRealtimeModeTurnsOnFromTheServiceMetadata(t *testing.T) {
 
 	task.QueueFrame(realtimeMetadata("OpenAIRealtime"))
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewVADUserStoppedSpeakingFrame(0.2, time.Now()))
 	task.QueueFrame(frames.NewTranscriptionFrame("hello there", "u", "ts"))
 	task.QueueFrame(frames.NewLLMFullResponseStartFrame())
@@ -163,6 +165,7 @@ func TestRealtimeModeCanBeRefused(t *testing.T) {
 
 	task.QueueFrame(realtimeMetadata("OpenAIRealtime"))
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewTranscriptionFrame("hello there", "u", "ts"))
 	task.QueueFrame(frames.NewVADUserStoppedSpeakingFrame(0.2, time.Now()))
 
@@ -183,6 +186,7 @@ func TestRealtimeCommitsWhatIsLeftAtSessionEnd(t *testing.T) {
 		speechTimeoutTurns(), aggregators.WithRealtimeServiceMode(true))
 
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewVADUserStoppedSpeakingFrame(0.2, time.Now()))
 	task.QueueFrame(frames.NewTranscriptionFrame("one last thing", "u", "ts"))
 	task.StopWhenDone()

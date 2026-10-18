@@ -563,7 +563,9 @@ func (b *Base) baseContext() context.Context {
 }
 
 // processLoop handles data and control frames in order. It runs under ctx,
-// which is canceled to interrupt the processor.
+// which is canceled to interrupt the processor. Once ctx is canceled the loop
+// handles nothing more: the frames queued behind the one that was interrupted
+// are what the interruption drops.
 func (b *Base) processLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	for {
@@ -572,11 +574,40 @@ func (b *Base) processLoop(ctx context.Context, done chan struct{}) {
 		if !ok {
 			return
 		}
-		b.setCurFrame(it.frame)
+		if !b.takeCurFrame(ctx, it) {
+			b.giveBack(it)
+			return
+		}
 		if !b.waitWhilePaused(ctx, false) {
+			b.giveBack(it)
 			return
 		}
 		_ = b.processFrame(ctx, it)
+	}
+}
+
+// takeCurFrame makes it the frame being handled, unless the loop was canceled
+// after taking it off the queue. It holds the same lock an interruption decides
+// under, so an interruption either sees the frame as current (and spares it if
+// it is uninterruptible) or has canceled the loop before the frame became
+// current.
+func (b *Base) takeCurFrame(ctx context.Context, it item) bool {
+	b.curMu.Lock()
+	defer b.curMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	b.curFrame = it.frame
+	return true
+}
+
+// giveBack returns a frame the process goroutine took but was stopped before
+// handling. An uninterruptible frame goes back to the head of the queue, since
+// nothing that stops the goroutine may drop it; the queue reset that follows
+// drops any other.
+func (b *Base) giveBack(it item) {
+	if !frames.Interruptible(it.frame) {
+		b.procQueue.requeue(it)
 	}
 }
 
@@ -600,7 +631,11 @@ func (b *Base) processFrame(ctx context.Context, it item) error {
 	b.notifyProcess(it.frame, it.dir)
 	b.events.Call(ctx, EventBeforeProcessFrame, b.self, it.frame)
 	if err := b.self.ProcessFrame(ctx, it.frame, it.dir); err != nil {
-		b.PushError(ctx, fmt.Sprintf("error processing frame: %v", err), err, false)
+		// A frame cut short by an interruption or a cancel is not a failure,
+		// so it is not reported as one.
+		if cerr := ctx.Err(); cerr == nil || !errors.Is(err, cerr) {
+			b.PushError(ctx, fmt.Sprintf("error processing frame: %v", err), err, false)
+		}
 		return err
 	}
 	b.events.Call(ctx, EventAfterProcessFrame, b.self, it.frame)
@@ -863,13 +898,19 @@ func (b *Base) startInterruption() {
 	if b.directMode {
 		return
 	}
-	if current := b.currentFrame(); current != nil && !frames.Interruptible(current) {
+	// The decision and the cancel are made under the lock the process goroutine
+	// takes a frame under, so a frame cannot become current between the two.
+	b.curMu.Lock()
+	if current := b.curFrame; current != nil && !frames.Interruptible(current) {
+		b.curMu.Unlock()
 		// The frame currently being processed is uninterruptible, so it must not
 		// be canceled. Only flush the interruptible frames queued behind it.
 		b.procQueue.reset()
 		return
 	}
-	b.cancelProcessTask()
+	wait := b.stopProcessTask()
+	b.curMu.Unlock()
+	wait()
 	b.createProcessTask()
 }
 
@@ -916,13 +957,21 @@ func (b *Base) resetProcessTask() {
 // cancelProcessTask cancels the process goroutine and waits for it to exit,
 // bounded by processCancelTimeout.
 func (b *Base) cancelProcessTask() {
+	b.stopProcessTask()()
+}
+
+// stopProcessTask cancels the process goroutine and returns a function that
+// waits for it to exit, bounded by processCancelTimeout. Canceling never blocks,
+// so it can be done under a lock the goroutine itself takes, with the wait left
+// until after the lock is released.
+func (b *Base) stopProcessTask() (wait func()) {
 	if b.directMode {
-		return
+		return func() {}
 	}
 	b.procMu.Lock()
 	if !b.procRunning {
 		b.procMu.Unlock()
-		return
+		return func() {}
 	}
 	cancel := b.procCancel
 	done := b.procDone
@@ -930,10 +979,12 @@ func (b *Base) cancelProcessTask() {
 	b.procMu.Unlock()
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(processCancelTimeout):
-		slog.Warn("timed out canceling process goroutine", "processor", b.name)
+	return func() {
+		select {
+		case <-done:
+		case <-time.After(processCancelTimeout):
+			slog.Warn("timed out canceling process goroutine", "processor", b.name)
+		}
 	}
 }
 
@@ -976,12 +1027,6 @@ func (b *Base) setCurFrame(f frames.Frame) {
 	b.curMu.Lock()
 	b.curFrame = f
 	b.curMu.Unlock()
-}
-
-func (b *Base) currentFrame() frames.Frame {
-	b.curMu.Lock()
-	defer b.curMu.Unlock()
-	return b.curFrame
 }
 
 var _ Processor = (*Base)(nil)

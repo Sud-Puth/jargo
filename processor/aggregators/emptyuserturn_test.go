@@ -75,8 +75,12 @@ func disabled() *turns.EmptyUserTurnConfig {
 	return &turns.EmptyUserTurnConfig{InterruptedPrompt: &none}
 }
 
-// script is what is sent: frames, and pauses between them.
+// script is what is sent: frames, pauses between them, and flushes.
 type script []any
+
+// flush is a script step that waits for the pipeline to settle. See
+// flushPipeline.
+type flush struct{}
 
 func emptyTurn() script {
 	return script{
@@ -89,6 +93,7 @@ func emptyTurn() script {
 func transcribedTurn(text string) script {
 	return script{
 		frames.NewVADUserStartedSpeakingFrame(0, time.Now()),
+		flush{},
 		frames.NewTranscriptionFrame(text, "", "now"),
 		frames.NewVADUserStoppedSpeakingFrame(0, time.Now()),
 		emptyTurnSpeech + 100*time.Millisecond,
@@ -132,6 +137,8 @@ func runScript(t *testing.T, s script, ps ...processor.Processor) {
 		switch v := step.(type) {
 		case time.Duration:
 			time.Sleep(v)
+		case flush:
+			flushPipeline(t, task)
 		case frames.Frame:
 			task.QueueFrame(v)
 		}

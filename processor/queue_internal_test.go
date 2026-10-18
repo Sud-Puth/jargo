@@ -104,3 +104,29 @@ func TestQueueResetKeepsWhatIsUninterruptibleNow(t *testing.T) {
 		t.Fatal("reset kept the frame set interruptible")
 	}
 }
+
+func TestQueueGetStopsOnceCanceled(t *testing.T) {
+	q := newQueue()
+	q.push(item{frame: frames.NewTextFrame("waiting")})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if it, ok := q.get(ctx); ok {
+		t.Fatalf("get handed out %s after its context was canceled", it.frame.Name())
+	}
+}
+
+func TestQueueRequeuePutsTheItemFirst(t *testing.T) {
+	q := newQueue()
+	q.push(item{frame: frames.NewTextFrame("second")})
+	q.requeue(item{frame: frames.NewTextFrame("first")})
+
+	for _, want := range []string{"first", "second"} {
+		got, ok := q.get(context.Background())
+		if !ok {
+			t.Fatal("get returned ok=false")
+		}
+		if tf, isText := got.frame.(*frames.TextFrame); !isText || tf.Text != want {
+			t.Fatalf("got %s, want %q", got.frame.Name(), want)
+		}
+	}
+}

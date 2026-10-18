@@ -13,6 +13,18 @@ import (
 	"github.com/gojargo/jargo/utils/events"
 )
 
+// flushPipeline waits for the pipeline to settle, which includes the
+// interruption a turn start sends back upstream. Every processor that
+// interruption reaches drops the frames waiting in its queue, so a test sending
+// a turn's frames right behind its start flushes first, the way they arrive in a
+// real call: well after the user started speaking.
+func flushPipeline(t *testing.T, task *pipeline.Worker) {
+	t.Helper()
+	if err := task.Flush(t.Context()); err != nil {
+		t.Fatalf("flushing the pipeline: %v", err)
+	}
+}
+
 func TestUserAggregatorTriggersLLMOnFinal(t *testing.T) {
 	convo := frames.NewLLMContext("system")
 	// The model-free stop chain: what is under test is when the LLM runs, not
@@ -93,6 +105,7 @@ func TestUserAggregatorTurnTakingGatesOnEndOfTurn(t *testing.T) {
 
 	// A finalized transcript without an end-of-turn must NOT trigger the LLM.
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	tf := frames.NewTranscriptionFrame("hello there", "u", "ts")
 	tf.Finalized = true
 	task.QueueFrame(tf)
@@ -156,6 +169,7 @@ func TestUserAggregatorKeepsTheTranscriptThatEndsTheTurn(t *testing.T) {
 	go func() { runDone <- task.Run(context.Background()) }()
 
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	first := frames.NewTranscriptionFrame("j'ai un ami qui me demande", "u", "ts")
 	first.Finalized = true
 	task.QueueFrame(first)
@@ -216,6 +230,7 @@ func TestUserAggregatorDoesNotAnswerATranscriptOutsideATurn(t *testing.T) {
 
 	// One turn, answered once.
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	first := frames.NewTranscriptionFrame("what time do you close", "u", "ts")
 	first.Finalized = true
 	task.QueueFrame(first)
@@ -417,6 +432,7 @@ func TestUserAggregatorRunsInferenceBeforeDeferredFinalization(t *testing.T) {
 	go func() { runDone <- task.Run(context.Background()) }()
 
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	tf := frames.NewTranscriptionFrame("what time do you close", "u", "ts")
 	tf.Finalized = true
 	task.QueueFrame(tf)
@@ -464,6 +480,7 @@ func TestUserAggregatorCommitsWhatIsHeldWhenTheSessionEnds(t *testing.T) {
 
 	// The user speaks, and the turn is never finalized before the end.
 	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	flushPipeline(t, task)
 	tf := frames.NewTranscriptionFrame("actually make it two", "u", "ts")
 	tf.Finalized = true
 	task.QueueFrame(tf)

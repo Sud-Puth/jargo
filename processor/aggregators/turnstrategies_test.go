@@ -104,6 +104,7 @@ func TestServiceRecommendedTurnStrategiesAreApplied(t *testing.T) {
 	// adopted strategies take that decision as made: the turn runs the model
 	// without the aggregator announcing it a second time or barging in.
 	task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewTranscriptionFrame("hello there", "u", "ts"))
 	task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
 
@@ -156,6 +157,7 @@ func TestConfiguredTurnStrategiesOverrideTheServiceRecommendation(t *testing.T) 
 	// The signals the recommended strategies would have acted on. The configured
 	// ones ignore them, so nothing runs the model.
 	task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewTranscriptionFrame("hello there", "u", "ts"))
 	task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
 
@@ -175,6 +177,7 @@ func TestProposalsProduceTurnFramesAndAnInterruption(t *testing.T) {
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewProposedUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewTranscriptionFrame("Hello!", "u", "ts"))
 	task.QueueFrame(frames.NewProposedUserStoppedSpeakingFrame())
 
@@ -222,6 +225,7 @@ func TestRealTurnFramesAreAdoptedWithoutReEmission(t *testing.T) {
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewTranscriptionFrame("Hello!", "u", "ts"))
 	task.QueueFrame(frames.NewUserStoppedSpeakingFrame())
 
@@ -269,6 +273,7 @@ func TestProposalsTravelOnWhenNothingResolvesThem(t *testing.T) {
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewProposedUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewProposedUserStoppedSpeakingFrame())
 
 	if n := awaitMatching(seen, isProposal, 2); n != 2 {
@@ -288,6 +293,7 @@ func TestProposalsAreConsumedByTheAssistantHalfWhenTheUserHalfResolves(t *testin
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewProposedUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewProposedUserStoppedSpeakingFrame())
 
 	if n := drainCount(seen, isProposal); n != 0 {
@@ -309,6 +315,7 @@ func TestProposalsPassTheAssistantHalfWhenTheUserHalfIgnoresThem(t *testing.T) {
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewProposedUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewProposedUserStoppedSpeakingFrame())
 
 	if n := awaitMatching(seen, isProposal, 2); n != 2 {
@@ -374,6 +381,7 @@ func TestTurnClosesOnTheStopSignalWhenTheTranscriptPrecedesIt(t *testing.T) {
 	defer func() { task.StopWhenDone(); <-runDone }()
 
 	task.QueueFrame(frames.NewProposedUserStartedSpeakingFrame())
+	flushPipeline(t, task)
 	task.QueueFrame(frames.NewInterimTranscriptionFrame("Hel", "u", "ts"))
 
 	if n := awaitMatching(seen, is[*frames.LLMContextFrame], 1); n != 1 {
