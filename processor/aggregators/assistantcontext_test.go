@@ -2,6 +2,7 @@ package aggregators_test
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -73,14 +74,17 @@ func TestAssistantMessagesUpdateRunsTheModel(t *testing.T) {
 // two.
 
 // TestMarkerIsWrittenAsItsOwnMessage checks the stand-alone shape: the marker is
-// the whole assistant turn, so it is recorded at once and generation is asked
-// for on the conversation it just changed.
+// the whole assistant turn, so it is recorded at once and the conversation is
+// announced downstream with the moment it was written, as a written turn is.
+// Generation is not asked for: the marker is the model's answer to the turn, so
+// running the model again would answer the same turn twice.
 func TestMarkerIsWrittenAsItsOwnMessage(t *testing.T) {
 	convo := frames.NewLLMContext("system")
-	task, generations, stop := assistantUpstream(t, convo)
-	defer stop()
+	h := newAssistantHarness(t, convo)
 
-	task.QueueFrame(frames.NewLLMMarkerFrame("◐"))
+	h.task.QueueFrame(frames.NewLLMFullResponseStartFrame())
+	h.task.QueueFrame(frames.NewLLMMarkerFrame("◐"))
+	h.task.QueueFrame(frames.NewLLMFullResponseEndFrame())
 
 	if !waitFor(3*time.Second, func() bool {
 		msgs := convo.Messages()
@@ -89,7 +93,24 @@ func TestMarkerIsWrittenAsItsOwnMessage(t *testing.T) {
 		t.Fatalf("conversation = %+v, want the marker recorded as an assistant message",
 			convo.Messages())
 	}
-	awaitCount(t, generations, 1, "a marker written on its own")
+	if !waitFor(3*time.Second, func() bool {
+		return slices.Contains(h.downstream(), "LLMContextAssistantTimestampFrame")
+	}) {
+		t.Fatalf("downstream = %v, want the marker's timestamp", h.downstream())
+	}
+	var announced []string
+	for _, name := range h.downstream() {
+		if name == "LLMContextFrame" || name == "LLMContextAssistantTimestampFrame" {
+			announced = append(announced, name)
+		}
+	}
+	if want := []string{"LLMContextFrame", "LLMContextAssistantTimestampFrame"}; !slices.Equal(announced, want) {
+		t.Errorf("downstream announced %v, want %v", announced, want)
+	}
+	settle()
+	if got := h.generations(); got != 0 {
+		t.Errorf("the model was asked to run %d times for a marker written on its own, want 0", got)
+	}
 }
 
 // TestHeldMarkerJoinsTheReplyButNotTheTranscript checks the held shape: the

@@ -1236,7 +1236,7 @@ func (a *AssistantAggregator) route(ctx context.Context, f frames.Frame, dir pro
 		// upstream of this processor, so the run it asks for has to travel back
 		// the other way. The frame is consumed, since running the model is what
 		// it asked for and nothing beyond this processor acts on it.
-		return a.pushContextFrame(ctx)
+		return a.pushContextFrame(ctx, processor.Upstream)
 	case *frames.FunctionCallsStartedFrame, *frames.FunctionCallInProgressFrame,
 		*frames.FunctionCallResultFrame, *frames.FunctionCallCancelFrame:
 		// Consumed, not forwarded. This aggregator is where a tool call becomes
@@ -1424,8 +1424,15 @@ func (a *AssistantAggregator) handleMarker(ctx context.Context, fr *frames.LLMMa
 	a.mu.Unlock()
 
 	if fr.AppendToContextImmediately {
+		// The conversation is announced downstream, as a written turn is, and not
+		// sent back to the model: the marker is the model's whole answer, so
+		// running the model on it would answer the same turn twice.
 		a.context.AddAssistantMessage(fr.Marker)
-		return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
+		if err := a.pushContextFrame(ctx, processor.Downstream); err != nil {
+			return err
+		}
+		return a.PushFrame(ctx,
+			frames.NewLLMContextAssistantTimestampFrame(frames.NowTimestamp()), processor.Downstream)
 	}
 	a.mu.Lock()
 	a.aggregation = append(a.aggregation, text.Part{Text: fr.Marker, IncludesInterPartSpaces: false})
@@ -1845,7 +1852,7 @@ func (a *AssistantAggregator) maybePushContextAfterFunctionResult(ctx context.Co
 	if speaking {
 		return nil
 	}
-	return a.pushContextFrame(ctx)
+	return a.pushContextFrame(ctx, processor.Upstream)
 }
 
 // Developer-role messages written to the conversation when the toolset changes
@@ -1929,13 +1936,14 @@ func isFunctionCallResult(f frames.Frame) bool {
 	return ok
 }
 
-// pushContextFrame runs generation on the current context, clearing any deferred
-// push since this one covers it.
-func (a *AssistantAggregator) pushContextFrame(ctx context.Context) error {
+// pushContextFrame pushes the current context in dir: upstream it runs
+// generation, downstream it announces the conversation as it now stands. Either
+// way it clears any deferred push, since this one covers it.
+func (a *AssistantAggregator) pushContextFrame(ctx context.Context, dir processor.Direction) error {
 	a.mu.Lock()
 	a.pushOnBotStopped = false
 	a.mu.Unlock()
-	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), processor.Upstream)
+	return a.PushFrame(ctx, frames.NewLLMContextFrame(a.context), dir)
 }
 
 // pushDeferredContext runs the generation a tool result deferred while the bot
@@ -1948,7 +1956,7 @@ func (a *AssistantAggregator) pushDeferredContext(ctx context.Context) error {
 	if !deferred {
 		return nil
 	}
-	return a.pushContextFrame(ctx)
+	return a.pushContextFrame(ctx, processor.Upstream)
 }
 
 // runContextUpdated runs a result's context-updated callback on a goroutine of
