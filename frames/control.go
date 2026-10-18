@@ -202,25 +202,6 @@ func NewFrameProcessorPauseFrame(p ProcessorTarget) *FrameProcessorPauseFrame {
 	}
 }
 
-// FrameProcessorResumeFrame asks a processor to resume the handling of data and
-// control frames it paused. Queued frames are then handled in the order they
-// were received. It is a control frame, so it is received in order, after the
-// frames queued ahead of it; use FrameProcessorResumeUrgentFrame to resume
-// immediately instead.
-type FrameProcessorResumeFrame struct {
-	BaseControlFrame
-	// Processor is the processor to resume.
-	Processor ProcessorTarget
-}
-
-// NewFrameProcessorResumeFrame builds a FrameProcessorResumeFrame addressed to p.
-func NewFrameProcessorResumeFrame(p ProcessorTarget) *FrameProcessorResumeFrame {
-	return &FrameProcessorResumeFrame{
-		BaseControlFrame: NewBaseControlFrame("FrameProcessorResumeFrame"),
-		Processor:        p,
-	}
-}
-
 // HeartbeatFrame is pushed through the pipeline at a fixed interval so the Task
 // can tell frames are still moving. It travels in order like any control frame,
 // which is what makes it a measure of the path real work takes. It is
@@ -251,7 +232,6 @@ func (f *HeartbeatFrame) String() string {
 var (
 	_ ControlFrame    = (*HeartbeatFrame)(nil)
 	_ ControlFrame    = (*FrameProcessorPauseFrame)(nil)
-	_ ControlFrame    = (*FrameProcessorResumeFrame)(nil)
 	_ ControlFrame    = (*EndFrame)(nil)
 	_ Uninterruptible = (*EndFrame)(nil)
 	_ ControlFrame    = (*StopFrame)(nil)

@@ -123,8 +123,10 @@ is what a `ParallelPipeline` does while it synchronizes a lifecycle frame.
 
 `frames.FrameProcessorPauseFrame` and `FrameProcessorResumeFrame` ask for the
 same thing in band, addressed to one processor by name, with
-`FrameProcessorPauseUrgentFrame` and `FrameProcessorResumeUrgentFrame` as the
-system-frame variants that overtake the queue.
+`FrameProcessorPauseUrgentFrame` as the system-frame variant that pauses ahead
+of the queue. `FrameProcessorResumeFrame` is a system frame itself: queued
+behind the pause it lifts, it would never be received. That makes
+`FrameProcessorResumeUrgentFrame` equivalent to it.
 
 ## Lifecycle
 

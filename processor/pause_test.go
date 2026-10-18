@@ -156,6 +156,28 @@ func TestPauseFramesAddressTheirProcessor(t *testing.T) {
 	mustReceive[*frames.TextFrame](t, c.got, "TextFrame")
 }
 
+// The in-order resume reaches a paused processor too. It is a system frame, so
+// it bypasses the queue the pause is holding rather than waiting behind it.
+func TestResumeFrameReleasesAPausedProcessor(t *testing.T) {
+	e, c, done := pausePair(t)
+	defer done()
+
+	ctx := context.Background()
+	_ = e.QueueFrame(ctx, frames.NewFrameProcessorPauseFrame(e), processor.Downstream)
+	mustReceive[*frames.FrameProcessorPauseFrame](t, c.got, "FrameProcessorPauseFrame")
+
+	_ = e.QueueFrame(ctx, frames.NewTextFrame("held"), processor.Downstream)
+	if !silentFor(c.got, 200*time.Millisecond) {
+		t.Fatal("frame was handled after a pause frame addressed to this processor")
+	}
+
+	_ = e.QueueFrame(ctx, frames.NewFrameProcessorResumeFrame(e), processor.Downstream)
+	mustReceive[*frames.FrameProcessorResumeFrame](t, c.got, "FrameProcessorResumeFrame")
+	if got := mustReceive[*frames.TextFrame](t, c.got, "TextFrame"); got.Text != "held" {
+		t.Errorf("Text = %q, want held", got.Text)
+	}
+}
+
 func TestPauseFrameIgnoredWhenAddressedElsewhere(t *testing.T) {
 	e, c, done := pausePair(t)
 	defer done()

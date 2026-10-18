@@ -196,7 +196,7 @@ is data precisely so that it *can* be thrown away.
 | `UserMuteStartedFrame` / `UserMuteStoppedFrame` | system | Input suppression, e.g. while the bot speaks. |
 | `UserIdleTimeoutUpdateFrame` | system | Retune the idle watchdog at runtime. |
 | `SpeechControlParamsFrame` | system | Broadcast the active end-of-turn timing. |
-| `UserTurnInferenceCompletedFrame` | control | An external judge finished ruling on the turn. |
+| `UserTurnInferenceCompletedFrame` | system | An external judge finished ruling on the turn. |
 | `LLMMarkerFrame` | data | A turn-completion marker the LLM emitted. |
 
 ### Text and transcription

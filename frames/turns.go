@@ -142,15 +142,15 @@ func (f *UserIdleTimeoutUpdateFrame) String() string {
 // UserTurnInferenceCompletedFrame signals that an external judge (an LLM
 // completion gate, an EOT classifier) decided the user's turn is semantically
 // complete. A turn-stop strategy waits for it to finalize the turn. It is a
-// control frame.
+// system frame.
 type UserTurnInferenceCompletedFrame struct {
-	BaseControlFrame
+	BaseSystemFrame
 }
 
 // NewUserTurnInferenceCompletedFrame builds a UserTurnInferenceCompletedFrame.
 func NewUserTurnInferenceCompletedFrame() *UserTurnInferenceCompletedFrame {
 	return &UserTurnInferenceCompletedFrame{
-		BaseControlFrame: NewBaseControlFrame("UserTurnInferenceCompletedFrame"),
+		BaseSystemFrame: NewBaseSystemFrame("UserTurnInferenceCompletedFrame"),
 	}
 }
 
@@ -324,7 +324,7 @@ var (
 	_ SystemFrame  = (*SpeechControlParamsFrame)(nil)
 	_ SystemFrame  = (*EagerEndOfTurnCancelFrame)(nil)
 	_ ControlFrame = (*VADParamsUpdateFrame)(nil)
-	_ ControlFrame = (*UserTurnInferenceCompletedFrame)(nil)
+	_ SystemFrame  = (*UserTurnInferenceCompletedFrame)(nil)
 	_ DataFrame    = (*LLMMarkerFrame)(nil)
 	_ DataFrame    = (*LLMMarkerResponseFrame)(nil)
 	_ DataFrame    = (*LLMConfigureOutputFrame)(nil)

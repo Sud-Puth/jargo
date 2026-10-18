@@ -229,11 +229,31 @@ func NewFrameProcessorPauseUrgentFrame(p ProcessorTarget) *FrameProcessorPauseUr
 	}
 }
 
+// FrameProcessorResumeFrame asks a processor to resume the handling of data and
+// control frames it paused. Queued frames are then handled in the order they
+// were received.
+//
+// It is a system frame, so it bypasses the queue the pause is holding: queued
+// behind the pause like a control frame, it would never be received. That makes
+// it equivalent to FrameProcessorResumeUrgentFrame.
+type FrameProcessorResumeFrame struct {
+	BaseSystemFrame
+	// Processor is the processor to resume.
+	Processor ProcessorTarget
+}
+
+// NewFrameProcessorResumeFrame builds a FrameProcessorResumeFrame addressed to p.
+func NewFrameProcessorResumeFrame(p ProcessorTarget) *FrameProcessorResumeFrame {
+	return &FrameProcessorResumeFrame{
+		BaseSystemFrame: NewBaseSystemFrame("FrameProcessorResumeFrame"),
+		Processor:       p,
+	}
+}
+
 // FrameProcessorResumeUrgentFrame asks a processor to resume the handling of
 // data and control frames it paused, as fast as possible. Queued frames are then
-// handled in the order they were received. It is a system frame, so it overtakes
-// the frames queued ahead of it; use FrameProcessorResumeFrame to resume in
-// order instead.
+// handled in the order they were received. It is a system frame, and now
+// equivalent to FrameProcessorResumeFrame, which is one too.
 type FrameProcessorResumeUrgentFrame struct {
 	BaseSystemFrame
 	// Processor is the processor to resume.
@@ -259,6 +279,7 @@ var (
 	_ ErrorReport = (*FatalErrorFrame)(nil)
 	_ SystemFrame = (*InterruptionFrame)(nil)
 	_ SystemFrame = (*FrameProcessorPauseUrgentFrame)(nil)
+	_ SystemFrame = (*FrameProcessorResumeFrame)(nil)
 	_ SystemFrame = (*FrameProcessorResumeUrgentFrame)(nil)
 	_ SystemFrame = (*UserStartedSpeakingFrame)(nil)
 	_ SystemFrame = (*UserStoppedSpeakingFrame)(nil)

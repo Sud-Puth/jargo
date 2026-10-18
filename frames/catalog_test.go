@@ -341,7 +341,7 @@ func catalog() []catalogEntry {
 			build: func() frames.Frame { return frames.NewFrameProcessorPauseFrame(namedProcessor("p")) },
 		},
 		{
-			label: "FrameProcessorResumeFrame", cat: control,
+			label: "FrameProcessorResumeFrame", cat: system,
 			build: func() frames.Frame { return frames.NewFrameProcessorResumeFrame(namedProcessor("p")) },
 		},
 		{
@@ -393,7 +393,7 @@ func catalog() []catalogEntry {
 			build: func() frames.Frame { return frames.NewTTSStoppedFrame() },
 		},
 		{
-			label: "UserTurnInferenceCompletedFrame", cat: control,
+			label: "UserTurnInferenceCompletedFrame", cat: system,
 			build: func() frames.Frame { return frames.NewUserTurnInferenceCompletedFrame() },
 		},
 		{
