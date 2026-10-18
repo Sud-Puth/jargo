@@ -148,6 +148,13 @@ aggregators.WithTurns(turns.Config{
 
 ## Implementation notes
 
+- The embedded Silero model is **v6.2**. Its recurrent state is reset about
+  every two seconds of audio, but only during clear non-speech: a reset waits
+  until the VAD is quiet and the model has scored a short run of windows as
+  clearly non-speech. Long silence, noise or music would otherwise shift the
+  state until speech that follows goes undetected, and a reset during speech
+  could end the user's turn early. Resets are timed by the audio, not the wall
+  clock.
 - VAD gating is **confidence-only**: jargo trusts Silero's neural confidence
   rather than adding a separate volume threshold.
 - Feature extraction for Smart Turn is a pure-Go reimplementation of Whisper's

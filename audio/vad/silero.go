@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/gojargo/jargo/internal/onnxrt"
 )
@@ -19,14 +18,38 @@ var (
 	errUnexpectedTensor      = errors.New("vad: unexpected output tensor type")
 )
 
-// modelResetInterval is how often the Silero model's recurrent state is reset.
-// The model does not need unbounded history, and periodic resets keep memory
-// and drift in check.
-const modelResetInterval = 5 * time.Second
+// Model state resets.
+//
+// The model carries a recurrent state from one window to the next. Non-speech
+// shifts that state so the model under-reports the speech that follows: music
+// strongly at either sample rate, and long silence or noise strongly at 8 kHz
+// and slightly at 16 kHz. A reset clears it.
+const (
+	// modelResetIntervalSecs is the seconds of audio between resets. After
+	// non-speech that suppresses detection, speech is detected again within
+	// about one interval. A shorter interval recovers sooner but puts more
+	// resets just ahead of speech, where the model occasionally confirms speech
+	// a few hundred milliseconds late.
+	modelResetIntervalSecs = 2.0
+	// A due reset waits for clear non-speech: the VAD must be quiet and
+	// modelResetLowConfidenceWindows consecutive windows (about 160 ms) must
+	// score below modelResetMaxConfidence. One low window can be a dip inside a
+	// word or the soft start of one; a run of them can't. The threshold sits far
+	// below the VAD's speech threshold, so borderline windows never count.
+	modelResetMaxConfidence        = 0.1
+	modelResetLowConfidenceWindows = 5
+)
 
 // Silero is a voice activity Analyzer backed by the Silero VAD ONNX model. It
 // supports 8 kHz and 16 kHz mono input and manages the model's recurrent state
 // and input context across calls.
+//
+// The model's recurrent state is reset about every two seconds of audio, but
+// only during clear non-speech. Non-speech such as music, or long silence at
+// 8 kHz, leaves the state unable to detect the speech that follows until it is
+// reset. A reset during speech makes the model briefly lose confidence, which
+// can end the user's speech early, so a due reset waits until the user is
+// quiet.
 type Silero struct {
 	*stateMachine
 
@@ -38,7 +61,10 @@ type Silero struct {
 	context     []float32
 	contextSize int
 
-	lastReset time.Time
+	// Windows scored since the model was last reset, and how many of the most
+	// recent windows in a row scored below modelResetMaxConfidence.
+	windowsSinceReset    int
+	lowConfidenceWindows int
 }
 
 // Option configures a Silero analyzer.
@@ -127,12 +153,40 @@ func (s *Silero) voiceConfidence(buffer []byte) float64 {
 
 	s.context = append(s.context[:0], input[len(input)-s.contextSize:]...)
 
-	now := time.Now()
-	if now.Sub(s.lastReset) >= modelResetInterval {
-		s.resetModel()
-		s.lastReset = now
-	}
+	s.maybeResetModel(conf)
 	return conf
+}
+
+// maybeResetModel resets the model's state once a reset is due and the user is
+// quiet.
+//
+// It is called after each window is scored, so a reset takes effect from the
+// next window. A reset clears the model's recurrent state and the audio context
+// it prepends to each window; the VAD's own state is untouched.
+//
+// A reset becomes due after modelResetIntervalSecs of audio, and happens on the
+// first window after that where the user is quiet and the recent windows are
+// clearly non-speech. The detection state is still the state from before this
+// window, since the caller updates it from the confidence returned here. In
+// practice a reset follows soon after the user stops speaking, and recurs every
+// interval during non-speech.
+//
+// Time is counted in windows of audio rather than by the wall clock, so where
+// resets land depends only on the audio.
+func (s *Silero) maybeResetModel(confidence float64) {
+	s.windowsSinceReset++
+	if confidence < modelResetMaxConfidence {
+		s.lowConfidenceWindows++
+	} else {
+		s.lowConfidenceWindows = 0
+	}
+
+	if float64(s.windowsSinceReset*s.numFramesRequired()) >= modelResetIntervalSecs*float64(s.sampleRate) &&
+		s.stateMachine.state == StateQuiet &&
+		s.lowConfidenceWindows >= modelResetLowConfidenceWindows {
+		s.resetModel()
+		s.windowsSinceReset = 0
+	}
 }
 
 // run executes one inference pass, feeding the recurrent state back in and
@@ -154,10 +208,12 @@ func (s *Silero) run(input []float32) (float64, error) {
 	return conf, nil
 }
 
-// Reset clears the model state, the input context and the detection state
-// machine.
+// Reset clears the model state, the input context, the reset schedule and the
+// detection state machine, as for a new stream.
 func (s *Silero) Reset() {
 	s.resetModel()
+	s.windowsSinceReset = 0
+	s.lowConfidenceWindows = 0
 	if s.stateMachine != nil {
 		s.reset()
 	}
@@ -168,7 +224,6 @@ func (s *Silero) resetModel() {
 		s.state[i] = 0
 	}
 	s.context = make([]float32, s.contextSize)
-	s.lastReset = time.Now()
 }
 
 // Close releases the model session.

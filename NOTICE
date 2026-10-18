@@ -33,7 +33,7 @@ Embedded models
 
 jargo embeds two ONNX models, used unmodified:
 
-  - Silero VAD (audio/vad/silero_vad.onnx), from
+  - Silero VAD v6.2 (audio/vad/silero_vad.onnx), from
     https://github.com/snakers4/silero-vad, copyright (c) Silero Team,
     licensed under the MIT License.
 
@@ -45,6 +45,10 @@ The Whisper-style log-mel feature extraction in audio/turn/whisper.go is a
 numpy-free Go reimplementation of the math in Hugging Face Transformers'
 WhisperFeatureExtractor (https://github.com/huggingface/transformers,
 copyright (c) The HuggingFace Team, Apache License 2.0).
+
+The speech fixture audio/vad/testdata/continuous_speech_16k.wav is taken
+unmodified from the Pipecat test assets (BSD 2-Clause License, above). It is
+synthesized speech and is used only by tests.
 
 
 Sentence segmentation
