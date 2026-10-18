@@ -7,8 +7,10 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/telemetry/metrics"
 	"github.com/gojargo/jargo/telemetry/tracing"
+	errs "github.com/gojargo/jargo/utils/errors"
 	"github.com/gojargo/jargo/utils/events"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -579,12 +582,22 @@ func (b *Base) processLoop(ctx context.Context, done chan struct{}) {
 
 // processFrame dispatches a frame to the concrete processor and turns a
 // processing error into an ErrorFrame pushed upstream.
+//
+// A panic while handling the frame is reported the same way and goes no
+// further: one faulty frame must not take down the goroutine that handles every
+// frame after it, let alone the process. Once reported it is handled, so it is
+// not returned to the caller as well.
 func (b *Base) processFrame(ctx context.Context, it item) error {
-	b.notifyProcess(it.frame, it.dir)
 	// A resume this frame carried takes effect once the frame itself has gone on,
 	// so what it released cannot overtake it. Deferred so a processor is released
 	// even when handling the frame failed.
 	defer b.applyPendingResume()
+	defer func() {
+		if v := recover(); v != nil {
+			b.reportPanic(ctx, "error processing frame", v)
+		}
+	}()
+	b.notifyProcess(it.frame, it.dir)
 	b.events.Call(ctx, EventBeforeProcessFrame, b.self, it.frame)
 	if err := b.self.ProcessFrame(ctx, it.frame, it.dir); err != nil {
 		b.PushError(ctx, fmt.Sprintf("error processing frame: %v", err), err, false)
@@ -696,7 +709,24 @@ func (b *Base) PushFrame(ctx context.Context, f frames.Frame, dir Direction) err
 
 // internalPushFrame hands the frame to the neighbor in dir, telling the
 // observers about the handover first.
+//
+// The observers and a direct-mode neighbor run inside the call, so a panic in
+// either is caught here and reported as an error from this processor, which
+// then carries on as though the push had gone through.
 func (b *Base) internalPushFrame(ctx context.Context, f frames.Frame, dir Direction) error {
+	defer func() {
+		if v := recover(); v != nil {
+			// Reporting an error pushes a frame through here too, so a fault that
+			// hits every push would report itself forever. The error that failed to
+			// travel is logged and dropped instead.
+			if _, isError := f.(*frames.ErrorFrame); isError {
+				slog.ErrorContext(ctx, "uncaught panic pushing an error frame; dropping it",
+					"processor", b.name, "panic", v, "stack", string(debug.Stack()))
+				return
+			}
+			b.reportPanic(ctx, "uncaught panic", v)
+		}
+	}()
 	switch dir {
 	case Downstream:
 		if b.next != nil {
@@ -905,6 +935,29 @@ func (b *Base) cancelProcessTask() {
 	case <-time.After(processCancelTimeout):
 		slog.Warn("timed out canceling process goroutine", "processor", b.name)
 	}
+}
+
+// reportPanic pushes upstream an error for a panic caught while this processor
+// was handling or pushing a frame. The fault may lie anywhere in the code that
+// ran, not necessarily in this processor, so its cause is reported as unknown.
+func (b *Base) reportPanic(ctx context.Context, msg string, v any) {
+	err := panicError(v)
+	slog.ErrorContext(ctx, "uncaught panic", "processor", b.name, "panic", v,
+		"stack", string(debug.Stack()))
+	b.PushError(ctx, fmt.Sprintf("%s: %v", msg, err), err, false, WithErrorCategory(errs.Unknown))
+}
+
+// ErrPanic is what a panic that was not raised with an error is reported as,
+// wrapped with the value it was raised with.
+var ErrPanic = errors.New("panic")
+
+// panicError turns a recovered panic value into an error, keeping it as is when
+// it already is one.
+func panicError(v any) error {
+	if err, ok := v.(error); ok {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrPanic, v)
 }
 
 func (b *Base) isCanceling() bool {
