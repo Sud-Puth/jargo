@@ -521,12 +521,14 @@ func (s *StreamService) Setup(ctx context.Context, st processor.Setup) error {
 	// Dialing here rather than on the StartFrame is what keeps it off the frame
 	// path: a pipeline sets its processors up at once, so several services
 	// connect together instead of one after another as the frame reaches them,
-	// and a service that cannot connect is reported and left unusable before the
-	// pipeline starts, in time for a switcher to move off it.
+	// and a service that cannot connect is reported before the pipeline starts.
+	// A refusal that will recur (a rejected key) leaves it unusable in time for a
+	// switcher to move off it; anything else is retried by the read loop.
 	//
 	// The connection outlives this call, so it is not tied to a context that
 	// ends with it.
-	return s.connect(context.WithoutCancel(ctx))
+	s.connect(context.WithoutCancel(ctx))
+	return nil
 }
 
 // ProcessFrame manages the connection lifecycle and streams audio.
@@ -644,21 +646,23 @@ func (s *StreamService) ServiceMetadataFrame() frames.ServiceMetadata {
 // connect opens the session and starts the read loop that owns it from here on.
 // The loop outlives any one session: when the session drops it opens another,
 // which is why the loop context is separate from the session's.
-func (s *StreamService) connect(ctx context.Context) error {
+//
+// A session that fails to open is reported, and the read loop starts all the
+// same: it is what retries, so a failed dial is recovered from the way a dropped
+// session is, with the same backoff and the same limit on attempts.
+func (s *StreamService) connect(ctx context.Context) {
 	readCtx, cancel := context.WithCancel(ctx)
 	s.ws.Connect()
-	if err := s.ConnectWebsocket(readCtx); err != nil {
-		cancel()
-		return err
-	}
 	s.mu.Lock()
 	s.readCancel = cancel
 	s.connectedAt = time.Now()
 	s.audioBytes = 0
 	s.mu.Unlock()
+	if err := s.ConnectWebsocket(readCtx); err != nil {
+		s.PushError(readCtx, "stt: unable to connect", err, false)
+	}
 	s.startKeepalive(readCtx)
 	s.wg.Go(func() { s.ws.ReceiveTaskHandler(readCtx, s.reportConnectionError) })
-	return nil
 }
 
 // disconnect closes the session and records what it transcribed. Streaming
@@ -902,7 +906,9 @@ func (s *StreamService) reopen(ctx context.Context) {
 
 	slog.Info("reopening the transcription session", "service", s.Name())
 	s.disconnect(ctx)
-	err := s.connect(ctx)
+	// A session that fails to open here is reported and retried by the read
+	// loop, as on the first connect.
+	s.connect(ctx)
 
 	s.mu.Lock()
 	s.reopening = false
@@ -910,10 +916,6 @@ func (s *StreamService) reopen(ctx context.Context) {
 	s.held = nil
 	s.mu.Unlock()
 
-	if err != nil {
-		s.PushError(ctx, "stt: reopening the session", err, false)
-		return
-	}
 	for _, audio := range held {
 		s.send(audio)
 	}
