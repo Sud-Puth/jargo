@@ -242,13 +242,8 @@ type Base struct {
 	// audioRemainders holds, per context, the trailing bytes of a sample split
 	// across audio chunks. See alignAudioFrame.
 	audioRemainders map[string]audioRemainder
-	// pendingResponseEnd holds the frame ending a model response, keyed by the
-	// context its speech was sent on, until that speech has been heard. Several
-	// contexts can be in flight at once, so each is held under its own key and
-	// released by its own context finishing.
-	pendingResponseEnd map[string]*frames.LLMFullResponseEndFrame
-	serial             *serialQueue
-	ctxCancel          context.CancelFunc
+	serial          *serialQueue
+	ctxCancel       context.CancelFunc
 	// ctxDone is closed when the drain goroutine exits, so a graceful end can
 	// wait for the queue it asked to shut down.
 	ctxDone chan struct{}
@@ -261,6 +256,9 @@ type Base struct {
 	// wordLastPTS is when the last word pushed downstream was spoken, so a
 	// context starting while another is still playing times its words after it.
 	wordLastPTS time.Duration
+	// replyStartPTS is what wordLastPTS was when the current model response
+	// started playing, which tells whether the response timed any words.
+	replyStartPTS time.Duration
 
 	// turnContext is the context every sentence of the current turn is sent on,
 	// empty between turns. Reusing it is what keeps the provider from opening a
@@ -792,23 +790,13 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	// The turn's context is done, so the whitespace opening the next one is its
 	// own to drop again.
 	b.setSentNonWhitespace(false)
-	// Taken before the turn is closed out, which is what forgets the id.
-	turnContext := b.turnContext
 	b.onTurnContextCompleted(ctx)
 	if isEnd {
 		return b.PushFrame(ctx, f, dir)
 	}
-	// A provider that times its words has its response end held back until the
-	// audio for it has been heard, and stamped with the moment of the last word,
-	// so it cannot overtake the words it is ending. One that does not time them
-	// pushes text a whole unit at a time on the serialization queue, and the end
-	// goes out behind that.
-	if end, ok := f.(*frames.LLMFullResponseEndFrame); ok && b.wordPath() {
-		if turnContext != "" {
-			b.holdResponseEnd(turnContext, end)
-		}
-		return nil
-	}
+	b.setLLMResponding(false)
+	// Queued behind the audio contexts, so the end follows the response's audio
+	// and text. It goes out whether or not the response produced any speech.
 	return b.queueSerial(ctx, f, dir)
 }
 

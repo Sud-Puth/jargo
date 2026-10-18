@@ -510,14 +510,15 @@ func TestSpeakFrameClosesTheAssistantTurnItOpened(t *testing.T) {
 // its own takes the other queue, so it would overtake the tail of the very
 // response it closes: a consumer keying off it, a turn observer or a client's
 // bot-stopped event, would see the response end while its last words were still
-// being said. It is held until the audio for the turn has been heard and stamped
-// with the last word's moment, and the frame held is the frame pushed, so a
-// consumer that recognizes a frame it has already seen is not told twice.
+// being said. It is queued behind the turn's audio and stamped with the last
+// word's moment, and the frame queued is the frame pushed, so a consumer that
+// recognizes a frame it has already seen is not told twice.
 func TestResponseEndFollowsTheWordsItEnds(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	var endPTS []int64
 	var endIDs []uint64
+	var lastWordPTS int64
 
 	synth := &fakeTimedSynth{rate: 24000, words: []timedWord{
 		{text: "Hello", offset: 0, pcm: make([]byte, 4800)},
@@ -533,6 +534,7 @@ func TestResponseEndFollowsTheWordsItEnds(t *testing.T) {
 		switch fr := f.(type) {
 		case *frames.TTSTextFrame:
 			order = append(order, "word:"+fr.Text)
+			lastWordPTS, _ = fr.PTS()
 		case *frames.LLMFullResponseEndFrame:
 			order = append(order, "end")
 			pts, _ := fr.PTS()
@@ -543,9 +545,10 @@ func TestResponseEndFollowsTheWordsItEnds(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- task.Run(context.Background()) }()
 
+	end := frames.NewLLMFullResponseEndFrame()
 	task.QueueFrame(frames.NewLLMFullResponseStartFrame())
 	task.QueueFrame(frames.NewLLMTextFrame("Hello there."))
-	task.QueueFrame(frames.NewLLMFullResponseEndFrame())
+	task.QueueFrame(end)
 	time.Sleep(600 * time.Millisecond)
 	task.StopWhenDone()
 	select {
@@ -562,9 +565,85 @@ func TestResponseEndFollowsTheWordsItEnds(t *testing.T) {
 	if len(order) == 0 || order[len(order)-1] != "end" {
 		t.Fatalf("frames reached the pipeline as %v, want the end of the response last", order)
 	}
-	if endPTS[0] <= 0 {
-		t.Fatalf("the end of the response was timed at %d, want the moment of the last word "+
-			"so it cannot overtake it", endPTS[0])
+	if endIDs[0] != end.ID() {
+		t.Fatalf("the response end pushed is frame %d, want the one queued (%d)", endIDs[0], end.ID())
+	}
+	if endPTS[0] <= 0 || endPTS[0] != lastWordPTS {
+		t.Fatalf("the end of the response was timed at %d, want the moment of the last word (%d) "+
+			"so it cannot overtake it", endPTS[0], lastWordPTS)
+	}
+}
+
+// runResponseEnds feeds frames to a word-timing service and returns every
+// response end that reached the end of the pipeline, in order.
+func runResponseEnds(t *testing.T, send []frames.Frame) []*frames.LLMFullResponseEndFrame {
+	t.Helper()
+	var mu sync.Mutex
+	var ends []*frames.LLMFullResponseEndFrame
+	synth := &fakeTimedSynth{rate: 24000, words: []timedWord{
+		{text: "Hi.", offset: 0, pcm: make([]byte, 4800)},
+	}}
+	base := tts.New("TimedTTS", synth)
+	task := pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+		if end, ok := f.(*frames.LLMFullResponseEndFrame); ok {
+			mu.Lock()
+			ends = append(ends, end)
+			mu.Unlock()
+		}
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+	for _, f := range send {
+		task.QueueFrame(f)
+	}
+	time.Sleep(600 * time.Millisecond)
+	task.StopWhenDone()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("task did not finish")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return ends
+}
+
+// Ported from upstream's frame-ordering suite. With word timestamps, a response
+// with nothing to speak still reports its end: nothing downstream may be left
+// waiting for a response that already finished.
+func TestResponseEndOfAResponseWithoutTextIsPushed(t *testing.T) {
+	end := frames.NewLLMFullResponseEndFrame()
+	ends := runResponseEnds(t, []frames.Frame{frames.NewLLMFullResponseStartFrame(), end})
+	if len(ends) != 1 || ends[0] != end {
+		t.Fatalf("response ends pushed = %v, want the one queued", ends)
+	}
+}
+
+// Ported from upstream's frame-ordering suite. A response that times no words
+// leaves its end unstamped, right behind its start, while a response that does
+// time words has its end stamped with the last of them. This response sends only
+// whitespace, which reaches no synthesis at all.
+func TestResponseEndOfAResponseWithoutTimedWordsHasNoPTS(t *testing.T) {
+	first, second := frames.NewLLMFullResponseEndFrame(), frames.NewLLMFullResponseEndFrame()
+	ends := runResponseEnds(t, []frames.Frame{
+		frames.NewLLMFullResponseStartFrame(),
+		frames.NewLLMTextFrame("Hi."),
+		first,
+		frames.NewLLMFullResponseStartFrame(),
+		frames.NewLLMTextFrame("  "),
+		second,
+	})
+	if len(ends) != 2 || ends[0] != first || ends[1] != second {
+		t.Fatalf("response ends pushed = %v, want both, in order", ends)
+	}
+	if pts, ok := first.PTS(); !ok || pts <= 0 {
+		t.Fatalf("the first response end was timed at %d (%v), want its last word's moment", pts, ok)
+	}
+	if pts, ok := second.PTS(); ok {
+		t.Fatalf("the second response end was timed at %d, want it unstamped", pts)
 	}
 }
 
@@ -808,4 +887,62 @@ func (s *spacingSynth) RunTTSTimed(
 		}
 	}
 	return nil
+}
+
+// Ported from upstream's frame-ordering suite. An utterance the service says
+// after a model response has ended has no response around it, so it closes the
+// assistant turn it opens itself, behind the response's own end. It holds for a
+// provider that times its words and for one that does not.
+func TestSpeakFrameAfterAResponseCommitsItsText(t *testing.T) {
+	t.Run("word timestamps", func(t *testing.T) {
+		testSpeakFrameAfterAResponse(t, &fakeTimedSynth{rate: 24000, words: []timedWord{
+			{text: "Hi.", offset: 0, pcm: make([]byte, 4800)},
+		}})
+	})
+	t.Run("no word timestamps", func(t *testing.T) {
+		testSpeakFrameAfterAResponse(t, &fakeSynth{rate: 24000, chunk: make([]byte, 4800), spoken: make(chan string, 8)})
+	})
+}
+
+func testSpeakFrameAfterAResponse(t *testing.T, synth tts.Synthesizer) {
+	t.Helper()
+	var mu sync.Mutex
+	var order []string
+	base := tts.New("SpeakTTS", synth)
+	task := pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch f.(type) {
+		case *frames.TTSTextFrame:
+			order = append(order, "word")
+		case *frames.LLMFullResponseEndFrame:
+			order = append(order, "end")
+		case *frames.LLMAssistantPushAggregationFrame:
+			order = append(order, "push")
+		}
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewLLMFullResponseStartFrame())
+	task.QueueFrame(frames.NewLLMTextFrame("Hi."))
+	task.QueueFrame(frames.NewLLMFullResponseEndFrame())
+	time.Sleep(300 * time.Millisecond)
+	task.QueueFrame(frames.NewTTSSpeakFrame("Hi."))
+	time.Sleep(500 * time.Millisecond)
+	task.StopWhenDone()
+	select {
+	case <-runDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("task did not finish")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"word", "end", "word", "push"}; !slices.Equal(order, want) {
+		t.Fatalf("frames reached the pipeline as %v, want %v", order, want)
+	}
 }
