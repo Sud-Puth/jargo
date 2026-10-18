@@ -708,7 +708,7 @@ func (o *blockingOutput) WriteAudio(ctx context.Context, _ frames.OutputAudioFra
 		return true, nil
 	case <-ctx.Done():
 		// What a real transport reports when the send loop is stopped under it,
-		// which is how a barge-in cuts short the write it interrupts.
+		// which is how a teardown cuts short the write in flight.
 		return false, ctx.Err()
 	}
 }
@@ -1524,47 +1524,6 @@ func captureErrorLogs(t *testing.T) func() []string {
 	return h.logged
 }
 
-// TestBaseOutputBargeInIsNotReportedAsAFailure covers the send the barge-in
-// itself cuts short. Restarting the audio loop cancels the send in flight on
-// purpose, so the interruption does not have to wait behind it, and the
-// transport reports that cancellation back. It is the interruption working as
-// designed, so nothing about it may be logged as a failure.
-//
-// Upstream gets this for free: canceling its audio task raises
-// asyncio.CancelledError, which derives from BaseException and so passes
-// straight through the handler that logs a failed send, unwinding the task.
-func TestBaseOutputBargeInIsNotReportedAsAFailure(t *testing.T) {
-	logged := captureErrorLogs(t)
-
-	params := transport.DefaultParams()
-	params.AudioOutSampleRate = 48000 // 1920-byte chunks
-
-	o := newBlockingOutput(params)
-	task := pipeline.NewWorker(pipeline.New(o), pipeline.WorkerConfig{})
-	runDone := make(chan error, 1)
-	go func() { runDone <- task.Run(context.Background()) }()
-
-	// The first chunk is taken up by the loop and blocks in the write, so the
-	// barge-in lands with a write in flight for it to cut short.
-	task.QueueFrame(frames.NewTTSAudioRawFrame(bytes.Repeat([]byte{0x01}, 1920*2), 48000, 1))
-	select {
-	case <-o.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the transport was never asked to write")
-	}
-
-	task.QueueFrame(frames.NewInterruptionFrame())
-	time.Sleep(200 * time.Millisecond)
-
-	if got := logged(); len(got) > 0 {
-		t.Errorf("the barge-in reported itself as a failure: %v", got)
-	}
-
-	close(o.release)
-	task.Cancel(t.Context(), "")
-	<-runDone
-}
-
 // decliningOutput reports every chunk as unsent without failing, the way a
 // transport reports audio it has nowhere to put: its track not live yet, its
 // stream closed, its serializer producing nothing for the frame.
@@ -1621,77 +1580,6 @@ func TestBaseOutputDoesNotForwardAudioTheTransportDeclined(t *testing.T) {
 	}
 	if got := logged(); len(got) > 0 {
 		t.Errorf("declining to send is not a failure, but it was reported as one: %v", got)
-	}
-
-	task.Cancel(t.Context(), "")
-	<-runDone
-}
-
-// blockingSyncFrameOutput holds every frame that carries no audio inside
-// WriteTransportFrame until the transport is stopped, so a test can leave the
-// audio loop inside that call when an interruption lands.
-type blockingSyncFrameOutput struct {
-	*transport.BaseOutput
-	entered chan struct{}
-}
-
-func newBlockingSyncFrameOutput(p transport.Params) *blockingSyncFrameOutput {
-	o := &blockingSyncFrameOutput{entered: make(chan struct{}, 8)}
-	o.BaseOutput = transport.NewBaseOutput("BlockingSyncFrameOutput", p, o)
-	return o
-}
-
-func (o *blockingSyncFrameOutput) WriteTransportFrame(ctx context.Context, _ frames.Frame) error {
-	select {
-	case o.entered <- struct{}{}:
-	default:
-	}
-	<-ctx.Done()
-	return ctx.Err()
-}
-
-// TestBaseOutputBargeInDropsAFrameItCutShort covers the same cancellation one
-// frame type over. A frame carrying no audio waits in the same queue and is
-// handed to the transport the same way, so a barge-in can cut that call short
-// too. The frame it caught belongs to the turn that was interrupted: it is
-// neither reported as a failure nor forwarded downstream as though the client
-// had received it.
-func TestBaseOutputBargeInDropsAFrameItCutShort(t *testing.T) {
-	logged := captureErrorLogs(t)
-
-	params := transport.DefaultParams()
-	params.AudioOutSampleRate = 48000
-
-	forwarded := make(chan struct{}, 4)
-	o := newBlockingSyncFrameOutput(params)
-	task := pipeline.NewWorker(pipeline.New(o), pipeline.WorkerConfig{
-		ReachedDownstreamFilter: pipeline.AnyFrame,
-	})
-	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
-		if _, ok := f.(*markerFrame); ok {
-			forwarded <- struct{}{}
-		}
-	})
-	runDone := make(chan error, 1)
-	go func() { runDone <- task.Run(context.Background()) }()
-
-	task.QueueFrame(newMarkerFrame())
-	select {
-	case <-o.entered:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the transport was never handed the frame")
-	}
-
-	task.QueueFrame(frames.NewInterruptionFrame())
-	time.Sleep(200 * time.Millisecond)
-
-	if got := logged(); len(got) > 0 {
-		t.Errorf("the barge-in reported itself as a failure: %v", got)
-	}
-	select {
-	case <-forwarded:
-		t.Error("a frame the transport never finished sending was forwarded downstream")
-	default:
 	}
 
 	task.Cancel(t.Context(), "")

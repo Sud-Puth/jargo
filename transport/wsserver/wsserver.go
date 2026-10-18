@@ -230,6 +230,12 @@ func (s *Session) read(ctx context.Context) ([]byte, error) {
 	return data, err
 }
 
+// write sends one message. The WebSocket library closes the whole connection
+// when ctx ends while a write is under way, since the peer would otherwise be
+// left with half a frame, so ctx has to be one whose end means the call is over:
+// the output's lifetime, bounded by its write timeout. A barge-in must never
+// cancel it. The base output keeps its audio loop running through one for that
+// reason, so a write it lands on is left to finish.
 func (s *Session) write(ctx context.Context, m Message) error {
 	typ := websocket.MessageText
 	if m.Binary {

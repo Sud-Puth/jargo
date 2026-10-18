@@ -1428,3 +1428,94 @@ func TestAPartialPacketIsDroppedOnABargeIn(t *testing.T) {
 			bytes.Count(data, []byte{0xAA}))
 	}
 }
+
+// bulkySerializer turns each audio chunk into a message far larger than the
+// socket buffers, so a write blocks for as long as the client is slow to read,
+// the way it does on a congested link.
+type bulkySerializer struct{ wsserver.BaseSerializer }
+
+func (bulkySerializer) Setup(processor.Setup) error { return nil }
+
+func (bulkySerializer) Serialize(f frames.Frame) (wsserver.Message, error) {
+	if _, ok := f.(frames.OutputAudioFrame); ok {
+		return wsserver.Message{Data: make([]byte, 32<<20), Binary: true}, nil
+	}
+	return wsserver.Message{}, nil
+}
+
+// Deserialize is never reached: the client in the test sends nothing.
+func (bulkySerializer) Deserialize([]byte) (frames.Frame, error) { return nil, errSerialize }
+
+// TestBargeInDuringABlockedWriteKeepsTheCall covers a barge-in landing while a
+// write is stuck against a client that is slow to read. The WebSocket library
+// closes the whole connection when a write is abandoned halfway, so the barge-in
+// must leave that write to finish: cutting it short would hang up the call.
+func TestBargeInDuringABlockedWriteKeepsTheCall(t *testing.T) {
+	trCh := make(chan *wsserver.Transport, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := wsserver.DefaultParams()
+		p.AudioOutSampleRate = 16000
+		tr, err := wsserver.Accept(w, r, bulkySerializer{}, p)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		trCh <- tr
+	}))
+	defer srv.Close()
+
+	ctx := t.Context()
+	c, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.CloseNow() }()
+	c.SetReadLimit(-1)
+	tr := <-trCh
+
+	task := pipeline.NewWorker(pipeline.New(tr.Input(), tr.Output()), pipeline.WorkerConfig{})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+	defer func() {
+		task.Cancel(context.Background(), "")
+		<-runDone
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	// The client is not reading yet, so the first message blocks in the write.
+	task.QueueFrame(frames.NewTTSAudioRawFrame(make([]byte, 640*10), 16000, 1))
+	time.Sleep(500 * time.Millisecond)
+	task.QueueFrame(frames.NewInterruptionFrame())
+	time.Sleep(300 * time.Millisecond)
+
+	// Now the client reads. The write the barge-in landed on completes, and the
+	// connection stays up after it. The reads run until the test ends: a read
+	// abandoned on a deadline closes the connection itself, which would be
+	// mistaken for the barge-in having closed it.
+	var received atomic.Int32
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				readErr <- err
+				return
+			}
+			received.Add(1)
+		}
+	}()
+
+	select {
+	case err := <-readErr:
+		t.Fatalf("the connection ended after %d messages with %v, want it still open after the barge-in",
+			received.Load(), err)
+	case <-tr.Done():
+		t.Fatal("the barge-in ended the call")
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if received.Load() == 0 {
+		t.Error("the client received nothing: the write in flight was abandoned")
+	}
+}

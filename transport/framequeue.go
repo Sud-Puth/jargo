@@ -62,6 +62,16 @@ func (q *frameQueue) hasUninterruptible() bool {
 	return slices.ContainsFunc(q.items, isUninterruptible)
 }
 
+// hasAudio reports whether the queue holds any audio still to be played.
+func (q *frameQueue) hasAudio() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.ContainsFunc(q.items, func(f frames.Frame) bool {
+		_, ok := f.(frames.OutputAudioFrame)
+		return ok
+	})
+}
+
 // reset drops every interruptible frame, keeping the uninterruptible ones in the
 // order they were queued so they are still delivered after an interruption.
 func (q *frameQueue) reset() {

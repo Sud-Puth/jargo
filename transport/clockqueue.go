@@ -91,11 +91,26 @@ func (q *clockQueue) stop() {
 	q.mu.Unlock()
 }
 
-// drop discards everything waiting, leaving the delivery goroutine running.
-func (q *clockQueue) drop() {
+// reset drops every interruptible frame waiting, keeping the uninterruptible
+// ones so they are still delivered after an interruption. The delivery goroutine
+// keeps running; it is woken so that a frame it was waiting on and that has just
+// been dropped does not hold up the ones behind it.
+func (q *clockQueue) reset() {
 	q.mu.Lock()
-	q.heap = nil
+	kept := q.heap[:0:0]
+	for _, it := range q.heap {
+		if !isUninterruptible(it.frame) {
+			continue
+		}
+		kept = append(kept, it)
+	}
+	heap.Init(&kept)
+	q.heap = kept
 	q.mu.Unlock()
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
 }
 
 // push queues a frame for delivery at pts, a presentation timestamp in

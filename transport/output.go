@@ -221,8 +221,7 @@ func (bo *BaseOutput) ProcessFrame(ctx context.Context, f frames.Frame, dir proc
 		// carrying something else (background audio, say), and cutting that too
 		// would silence what the interruption was never about.
 		if s := bo.senderFor(f); s != nil {
-			s.handleInterruption()
-			s.botStoppedSpeaking(ctx)
+			s.handleInterruption(ctx)
 		}
 		return nil
 	case *frames.OutputDTMFUrgentFrame:

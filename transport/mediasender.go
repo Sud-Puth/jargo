@@ -46,13 +46,8 @@ type mediaSender struct {
 	// reads that type to tell which of the two it is pacing out.
 	newChunk func(pcm []byte, sampleRate, numChannels int) frames.Frame
 
-	// lifeMu serializes starting, restarting and stopping the audio loop, so a
-	// barge-in restarting it cannot add to the wait group while a teardown is
-	// waiting on it.
-	lifeMu sync.Mutex
-	// parentCtx is what the audio context is derived from, kept so a restart
-	// after an interruption outlives the frame that caused it.
-	parentCtx   context.Context
+	// lifeMu serializes starting and stopping the audio loop.
+	lifeMu      sync.Mutex
 	audioOut    *frameQueue
 	audioCtx    context.Context
 	audioCancel context.CancelFunc
@@ -98,7 +93,6 @@ func (s *mediaSender) start(ctx context.Context) {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 
-	s.parentCtx = ctx
 	s.bufMu.Lock()
 	s.clearAudioBuffer()
 	s.bufMu.Unlock()
@@ -379,6 +373,18 @@ func (s *mediaSender) takeAudioChunk() ([]byte, bool) {
 // clearAudioBuffer drops the buffered audio. The caller holds bufMu.
 func (s *mediaSender) clearAudioBuffer() { s.audioRuns = nil }
 
+// keepUninterruptibleAudio drops the buffered audio that came from interruptible
+// frames, keeping the rest in order. The caller holds bufMu.
+func (s *mediaSender) keepUninterruptibleAudio() {
+	kept := s.audioRuns[:0:0]
+	for _, run := range s.audioRuns {
+		if run.uninterruptible {
+			kept = append(kept, run)
+		}
+	}
+	s.audioRuns = kept
+}
+
 // resample converts audio at sampleRate to the transport output rate. The
 // resampler is created lazily and reused across frames.
 //
@@ -411,53 +417,38 @@ func (s *mediaSender) resample(pcm []byte, sampleRate, channels int) []byte {
 	return s.resampler.Process(pcm)
 }
 
-// handleInterruption drops buffered output audio so the bot stops speaking
-// promptly on a barge-in. The pending sub-chunk tail is discarded along with
-// everything else: a barge-in cuts the bot off, tail included.
-func (s *mediaSender) handleInterruption() {
-	s.bufMu.Lock()
-	s.clearAudioBuffer()
-	s.bufMu.Unlock()
-	if s.clockQ != nil {
-		// The frames waiting on the clock belong to audio that will never play.
-		s.clockQ.drop()
-	}
-
+// handleInterruption drops what the bot had yet to say on a barge-in, keeping
+// whatever has to be delivered through one.
+//
+// The audio loop keeps running and only its queue is drained of interruptible
+// frames, so the frame being written and the uninterruptible ones still pending
+// are delivered. Stopping the loop instead would cut short the write in flight,
+// which a transport may not survive (a WebSocket closes the whole connection on
+// a write abandoned halfway), and with a mixer it would also stop the mixer's
+// own output while the loop restarted, leaving an audible gap in the background
+// audio.
+func (s *mediaSender) handleInterruption(ctx context.Context) {
 	q := s.audioOut
-	if q == nil {
-		return
-	}
-	// Frames marked uninterruptible have to be delivered even through a
-	// barge-in, and a mixer has to keep playing through one, so in either case
-	// the loop keeps running and only the queue is cleared. Canceling it would
-	// stop the mixer's own output too, leaving an audible gap in the background.
-	if q.hasUninterruptible() || s.mixer != nil {
+	if q != nil {
 		q.reset()
-		return
 	}
-	// Nothing has to survive, so restart the loop instead of draining it: that
-	// cuts short a write already in flight rather than leaving the barge-in
-	// waiting behind it.
-	s.restartAudioLoop()
-}
+	// The same goes for the audio still waiting to fill a chunk.
+	s.bufMu.Lock()
+	s.keepUninterruptibleAudio()
+	audioLeft := len(s.audioRuns) > 0
+	s.bufMu.Unlock()
 
-// restartAudioLoop stops the audio loop and starts a fresh one on an empty
-// queue.
-func (s *mediaSender) restartAudioLoop() {
-	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
-
-	cancel := s.audioCancel
-	if cancel == nil {
-		return
+	// Likewise, the clock keeps running and only its interruptible frames are
+	// dropped: they belong to audio that will never play.
+	if s.clockQ != nil {
+		s.clockQ.reset()
 	}
-	cancel()
-	s.audioWG.Wait()
 
-	s.audioCtx, s.audioCancel = context.WithCancel(s.parentCtx)
-	s.audioOut = newFrameQueue()
-	s.audioWG.Add(1)
-	go s.audioLoop(s.audioCtx)
+	// The bot keeps the floor while uninterruptible audio is still to play, and
+	// after the reset everything left in the queue is uninterruptible.
+	if !audioLeft && (q == nil || !q.hasAudio()) {
+		s.botStoppedSpeaking(ctx)
+	}
 }
 
 // handleBotSpeech updates the bot-speaking state from one chunk of outgoing
@@ -758,9 +749,10 @@ func (s *mediaSender) signalDrained() {
 // downstream treats it as having been heard.
 //
 // It reports whether the loop that called it should carry on. Cancellation ends
-// it: the loop is being restarted by a barge-in or torn down by a stop, so the
-// frame it was holding belongs to a turn that is over. That frame is abandoned
-// where it stands, unreported and unforwarded, and the loop ends with it.
+// it: the loop is being torn down by a stop, so the frame it was holding will
+// never be heard. That frame is abandoned where it stands, unreported and
+// unforwarded, and the loop ends with it. A barge-in does not cancel the loop,
+// so a frame already handed to the transport is always seen through.
 func (s *mediaSender) handleQueuedFrame(ctx context.Context, f frames.Frame) bool {
 	pushDownstream := true
 
@@ -809,10 +801,10 @@ func (s *mediaSender) handleQueuedFrame(ctx context.Context, f frames.Frame) boo
 	return true
 }
 
-// canceled reports whether ctx is done, which is how a barge-in restarting the
-// audio loop, or a stop tearing it down, cuts short whatever send is in flight
-// at the time. That is the interruption doing its job rather than the transport
-// failing, so the send it caught is abandoned instead of being reported.
+// canceled reports whether ctx is done, which is how a stop tearing the audio
+// loop down cuts short whatever send is in flight at the time. That is the
+// teardown doing its job rather than the transport failing, so the send it
+// caught is abandoned instead of being reported.
 //
 // It tests the caller's own context rather than the error the send returned, so
 // that a context.Canceled surfacing from inside a transport (its connection
