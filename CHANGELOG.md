@@ -15,6 +15,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Thought frames from Anthropic and Gemini.** The Anthropic service streams
+  thinking blocks as `LLMThoughtStartFrame`, `LLMThoughtTextFrame` and
+  `LLMThoughtEndFrame` (carrying the signature), and every request opts into
+  interleaved thinking, so the model can think between tool calls. Bedrock
+  leaves that beta off; another backend can do the same with
+  `anthropic.Config.OmitInterleavedThinkingBeta`. The Gemini service pushes
+  thought parts as thought frames and keeps their signatures
+  (`gemini.NewThoughtSignature`).
+
 - **Semgrep static analysis.** The security workflow runs Semgrep Community
   Edition with the Go ruleset and reports its findings to the Security tab
   without failing the build. `make sast` runs the same scan locally.
@@ -370,6 +379,107 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   replacement: choose another TTS provider.
 
 ### Fixed
+
+- **A panic in a processor no longer takes the process down.** A panic while
+  a processor handles or pushes a frame is recovered and reported upstream as
+  an `ErrorFrame` wrapping `processor.ErrPanic`, with the stack logged, and the
+  processor goes on with the next frame. Before, one bad frame in one session
+  crashed every session in the process.
+
+- **Interruptions drop the frames queued behind the one they cancel.** A
+  cancelled process goroutine went on to handle every frame already in its
+  queue before it exited, so text and audio queued behind an interrupted frame
+  still reached downstream, ahead of the interruption. It now stops at once,
+  and an uninterruptible frame it had taken but not started goes back to the
+  head of the queue. A frame that fails only because the interruption
+  cancelled it is no longer reported as an error.
+
+- **A processor never runs two process goroutines.** If a frame did not stop
+  within 3 s of being cancelled, a second goroutine was started beside the
+  first, and both then ran the processor's frames at once. The wait for the
+  process goroutine now has no time limit; the 3 s bound applies to the input
+  goroutine only. A `ProcessFrame` that ignores its context therefore holds up
+  the interruption until it returns.
+
+- **A paused processor can be resumed.** `FrameProcessorResumeFrame` was a
+  control frame, so it queued behind the frames the pause was holding and was
+  never handled. **Breaking:** it is now a system frame, the same as
+  `FrameProcessorResumeUrgentFrame`, and `UserTurnInferenceCompletedFrame` is a
+  system frame too, so an interruption on its way can no longer drop it.
+
+- **The Silero VAD keeps detecting speech through long noise.** The bundled
+  model is now Silero VAD v6.2: the earlier v6 drifted during long silence or
+  noise until it stopped detecting speech. Its recurrent state is no longer
+  reset every 5 s of wall clock, which could land mid-word and end the user's
+  speech early. A reset becomes due after 2 s of audio and happens only once
+  the VAD is quiet and five consecutive windows score below 0.1 confidence.
+  Time is counted in audio, so where resets land depends only on the stream.
+
+- **The assistant aggregator no longer loses or repeats a model run.**
+  - A turn-completion marker appended to the context straight away announced
+    the context upstream, which ran the model again on a context ending in the
+    marker. It is now pushed downstream, followed by an
+    `LLMContextAssistantTimestampFrame`.
+  - A tool result asking for a run keeps that run owed until a later result,
+    an append or the end of the user's turn can make it, whatever that later
+    frame asks for. A burst of results ending in one that does not ask to run,
+    or a result landing during a user turn that ends empty, no longer leaves
+    the bot silent after a tool call. A new response clears the owed run.
+  - An assistant-side `LLMMessagesAppendFrame` asking for a run is held while
+    the bot speaks and owed while the user speaks, like a tool result, and
+    appends queued together run the model once.
+  - An empty end of response no longer drops a deferred run.
+
+- **TTS interruptions reach the provider.** The base called
+  `OnAudioContextInterrupted` only after it had already forgotten the open
+  contexts, so it never ran: Cartesia kept generating speech the user had cut
+  off, and ElevenLabs carried one turn's state into the next. Each open context
+  is now reported, in the order it was opened, before it is removed, and the
+  context that was playing is reported interrupted rather than completed.
+
+- **The end of an LLM response always reaches downstream.** With word
+  timestamps on, an `LLMFullResponseEndFrame` for a response that opened no
+  audio (a tool call alone, or only whitespace) was held forever, so the
+  assistant's turn never closed. It is now queued behind the turn's audio and
+  stamped with the last word's time. A `TTSSpeakFrame` arriving after a reply
+  now commits its text to the context again.
+
+- **A streaming STT whose connection fails is retried.** A failed first
+  connection or a failed reopen left the service unusable for the whole call
+  and dropped all audio. The read loop now starts anyway and the service
+  reconnects with backoff, giving up permanently after three attempts.
+  `wsservice.TryReconnect` stops quietly once its context is cancelled instead
+  of dialing on and reporting a permanent error.
+
+- **A barge-in no longer drops the call.** An interruption cancelled the output
+  audio loop, and with it any write in flight; on a WebSocket that closed the
+  connection. The loop now keeps running: the queue is reset, audio not yet
+  written keeps only its uninterruptible parts, timed frames marked
+  uninterruptible survive, and the bot is reported stopped only once no audio
+  is left.
+
+- **The WebRTC transport honours the pipeline's sample rates.** Input was
+  always labelled 48 kHz and output always framed at 48 kHz, so any other rate
+  sent mislabelled audio to STT and played the bot at the wrong speed and
+  pitch. Input is now resampled to the input rate, and the Opus encoder takes
+  the output rate (`opus.EncoderConfig.SampleRate`, `opus.FrameBytesAt`).
+
+- **LLM adapters no longer write into the stored context.** The Anthropic and
+  Gemini adapters changed provider-native messages the context still held, a
+  data race when a summary or a one-shot inference ran beside a generation
+  (fatal on Gemini). They now copy before converting.
+
+- **Reasoning is kept across turns.** The Anthropic adapter now reads the
+  thoughts the aggregator stores, where it used to fail every later request
+  once one was present, and turns them back into thinking blocks. Gemini thought
+  signatures are kept and applied to the turns they belong to, parallel tool
+  calls are grouped as thinking models expect, and the placeholder signature is
+  used only on turns still unsigned. With `IncludeThoughts` on, Gemini's
+  thinking is pushed as thought frames instead of being spoken as the answer.
+  **Breaking:** `anthropic.NewThought` builds the stored map form, and a bare
+  `anthropic.Thought` used as a native message is no longer recognised. Gemini
+  function call ids now come from the API (or a fresh UUID) instead of
+  `call_0`, `call_1`, which restarted on every response.
 
 - **AWS Nova Sonic defaults to `amazon.nova-2-sonic-v1:0`.** Bedrock removed
   the first-generation `amazon.nova-sonic-v1:0` and rejects requests naming
