@@ -6,11 +6,14 @@
 package processor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,10 +46,12 @@ func (d Direction) String() string {
 	return "downstream"
 }
 
-// processCancelTimeout bounds how long an interruption or cleanup waits for a
-// processor's in-flight frame to finish after its context is canceled. It
-// guards against a ProcessFrame implementation that ignores cancellation.
-const processCancelTimeout = 3 * time.Second
+// inputCancelTimeout bounds how long tearing a processor down waits for its
+// input goroutine to exit after its context is canceled. It guards against a
+// ProcessFrame implementation that ignores cancellation while handling a system
+// frame. The process goroutine is waited for without a bound: see
+// stopProcessTask.
+const inputCancelTimeout = 3 * time.Second
 
 // Running is the pipeline a processor belongs to, for the few things a
 // processor needs from it that the frame path cannot express on its own. It is
@@ -279,6 +284,9 @@ type Base struct {
 	procRunning bool
 	procCancel  context.CancelFunc
 	procDone    chan struct{}
+	// procGoroutine identifies the goroutine running processLoop, so a request
+	// to cancel it made from that very goroutine can be recognized.
+	procGoroutine atomic.Uint64
 
 	curMu    sync.Mutex
 	curFrame frames.Frame
@@ -460,21 +468,25 @@ func (b *Base) Setup(ctx context.Context, s Setup) error {
 	return nil
 }
 
-// Cleanup implements Processor. It stops the process and input goroutines and
+// Cleanup implements Processor. It stops the input and process goroutines and
 // waits for the event handlers still running, so a caller reading what a handler
 // collected does not race it.
+//
+// The input goroutine is stopped first. Its context is the parent of the process
+// goroutine's, so canceling it reaches both at once. The process goroutine is
+// then waited for without a bound, like any cancel of it (see stopProcessTask).
 func (b *Base) Cleanup(ctx context.Context) error {
 	// A processor left holding frames could not handle the ones that shut it
 	// down, so the hold is lifted before anything else.
 	b.cancelPauseWatcher()
-	b.cancelProcessTask()
 	b.cancelInputTask()
+	b.cancelProcessTask()
 	b.events.Cleanup(ctx)
 	return nil
 }
 
 // cancelInputTask cancels the input goroutine and waits for it to exit, bounded
-// by processCancelTimeout.
+// by inputCancelTimeout.
 //
 // The bound is what keeps one stuck processor from holding up the whole
 // shutdown. Canceling the context only unblocks the loop between frames: a
@@ -498,7 +510,7 @@ func (b *Base) cancelInputTask() {
 	}()
 	select {
 	case <-done:
-	case <-time.After(processCancelTimeout):
+	case <-time.After(inputCancelTimeout):
 		slog.Warn("timed out canceling input goroutine", "processor", b.name)
 	}
 }
@@ -568,6 +580,7 @@ func (b *Base) baseContext() context.Context {
 // are what the interruption drops.
 func (b *Base) processLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	b.procGoroutine.Store(goroutineID())
 	for {
 		b.setCurFrame(nil)
 		it, ok := b.procQueue.get(ctx)
@@ -898,6 +911,14 @@ func (b *Base) startInterruption() {
 	if b.directMode {
 		return
 	}
+	if b.onProcessGoroutine() {
+		// The goroutine cannot cancel itself and wait for itself to exit. What is
+		// queued behind the frame it is handling is dropped instead, as
+		// BroadcastInterruption does.
+		slog.Warn("ignoring attempt to cancel the process goroutine from itself", "processor", b.name)
+		b.resetProcessTask()
+		return
+	}
 	// The decision and the cancel are made under the lock the process goroutine
 	// takes a frame under, so a frame cannot become current between the two.
 	b.curMu.Lock()
@@ -954,18 +975,30 @@ func (b *Base) resetProcessTask() {
 	b.procQueue.reset()
 }
 
-// cancelProcessTask cancels the process goroutine and waits for it to exit,
-// bounded by processCancelTimeout.
+// cancelProcessTask cancels the process goroutine and waits for it to exit.
 func (b *Base) cancelProcessTask() {
 	b.stopProcessTask()()
 }
 
 // stopProcessTask cancels the process goroutine and returns a function that
-// waits for it to exit, bounded by processCancelTimeout. Canceling never blocks,
-// so it can be done under a lock the goroutine itself takes, with the wait left
-// until after the lock is released.
+// waits for it to exit. Canceling never blocks, so it can be done under a lock
+// the goroutine itself takes, with the wait left until after the lock is
+// released.
+//
+// The wait has no bound. A goroutine cannot be stopped from outside, so one
+// that is given up on keeps running, and a processor that then starts another
+// would have two handling its frames at once, out of order. A ProcessFrame
+// that ignores its context therefore holds up whoever canceled it until it
+// returns.
+//
+// A request made from the process goroutine itself is ignored, since waiting
+// for itself to exit would never return.
 func (b *Base) stopProcessTask() (wait func()) {
 	if b.directMode {
+		return func() {}
+	}
+	if b.onProcessGoroutine() {
+		slog.Warn("ignoring attempt to cancel the process goroutine from itself", "processor", b.name)
 		return func() {}
 	}
 	b.procMu.Lock()
@@ -979,13 +1012,28 @@ func (b *Base) stopProcessTask() (wait func()) {
 	b.procMu.Unlock()
 
 	cancel()
-	return func() {
-		select {
-		case <-done:
-		case <-time.After(processCancelTimeout):
-			slog.Warn("timed out canceling process goroutine", "processor", b.name)
-		}
+	return func() { <-done }
+}
+
+// onProcessGoroutine reports whether the caller is running on this processor's
+// process goroutine.
+func (b *Base) onProcessGoroutine() bool {
+	id := b.procGoroutine.Load()
+	return id != 0 && id == goroutineID()
+}
+
+// goroutineID returns the runtime's number for the calling goroutine, read from
+// the header of its stack trace ("goroutine 18 [running]:"). It is only used to
+// recognize a goroutine, never to address one.
+func goroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	field := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
+	if i := bytes.IndexByte(field, ' '); i >= 0 {
+		field = field[:i]
 	}
+	id, _ := strconv.ParseUint(string(field), 10, 64)
+	return id
 }
 
 // reportPanic pushes upstream an error for a panic caught while this processor
