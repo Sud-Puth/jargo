@@ -14,6 +14,7 @@ import (
 	"github.com/gojargo/jargo/adapter"
 	anthropicadapter "github.com/gojargo/jargo/adapter/anthropic"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/service/llm"
 )
 
@@ -193,6 +194,9 @@ func (s *Service) Generate(ctx context.Context, convo *frames.LLMContext, emit l
 				return err
 			}
 		}
+		if err := s.pushThought(ctx, event); err != nil {
+			return err
+		}
 		delta, ok := event.AsAny().(sdk.ContentBlockDeltaEvent)
 		if !ok {
 			continue
@@ -212,6 +216,42 @@ func (s *Service) Generate(ctx context.Context, convo *frames.LLMContext, emit l
 		return s.PushTokenUsage(ctx, toUsage(acc.Usage))
 	}
 	return nil
+}
+
+// pushThought pushes the thought frames a stream event carries, if any.
+//
+// A thinking block opens a thought, each thinking delta is a chunk of its text,
+// and the signature delta Anthropic sends just before the block closes ends it,
+// carrying the signature with it. The thought is asked back into the
+// conversation as this provider's own message: a thinking block has to be
+// handed back on the next turn, signature intact, for the model to carry its
+// reasoning across a tool call.
+func (s *Service) pushThought(ctx context.Context, event sdk.MessageStreamEventUnion) error {
+	var f frames.Frame
+	switch ev := event.AsAny().(type) {
+	case sdk.ContentBlockStartEvent:
+		if ev.ContentBlock.Type != "thinking" {
+			return nil
+		}
+		start := frames.NewLLMThoughtStartFrame()
+		start.AppendToContext = true
+		start.LLM = s.adapter.IDForLLMSpecificMessages()
+		f = start
+	case sdk.ContentBlockDeltaEvent:
+		switch d := ev.Delta.AsAny().(type) {
+		case sdk.ThinkingDelta:
+			f = frames.NewLLMThoughtTextFrame(d.Thinking)
+		case sdk.SignatureDelta:
+			end := frames.NewLLMThoughtEndFrame()
+			end.Signature = d.Signature
+			f = end
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	return s.PushFrame(ctx, f, processor.Downstream)
 }
 
 // carriesModelOutput reports whether a stream event holds output the model
@@ -247,6 +287,9 @@ func (s *Service) GenerateWithTools(ctx context.Context, convo *frames.LLMContex
 			s.StopTTFBMetrics()
 		}
 		if err := acc.Accumulate(event); err != nil {
+			return err
+		}
+		if err := s.pushThought(ctx, event); err != nil {
 			return err
 		}
 		// Emit text deltas live so first-token latency is unaffected by the

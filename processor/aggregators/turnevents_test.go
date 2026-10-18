@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gojargo/jargo/adapter"
+	anthropicadapter "github.com/gojargo/jargo/adapter/anthropic"
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/pipeline"
 	"github.com/gojargo/jargo/processor/aggregators"
@@ -384,6 +386,52 @@ func TestAssistantRecordsAThought(t *testing.T) {
 	msgs := convo.Messages()
 	if len(msgs) != 1 || !msgs[0].IsLLMSpecific() || msgs[0].LLM != "anthropic" {
 		t.Fatalf("context messages = %+v, want one written as the provider's own", msgs)
+	}
+}
+
+// TestAThoughtRoundTripsToAnthropic checks a thought the Anthropic service asked
+// back is kept in a form its adapter reads: on the next request it is a thinking
+// block, signature intact, ahead of the reply it preceded in the same turn.
+func TestAThoughtRoundTripsToAnthropic(t *testing.T) {
+	convo := frames.NewLLMContext("system")
+	convo.AddUserMessage("Is there tea?")
+	pair := aggregators.New(convo)
+
+	task := pipeline.NewWorker(pipeline.New(pair.Assistant()), pipeline.WorkerConfig{})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewLLMFullResponseStartFrame())
+	start := frames.NewLLMThoughtStartFrame()
+	start.AppendToContext = true
+	start.LLM = "anthropic"
+	task.QueueFrame(start)
+	task.QueueFrame(frames.NewLLMThoughtTextFrame("The menu has tea."))
+	end := frames.NewLLMThoughtEndFrame()
+	end.Signature = "sig"
+	task.QueueFrame(end)
+	task.QueueFrame(frames.NewLLMTextFrame("We have tea."))
+	task.QueueFrame(frames.NewLLMFullResponseEndFrame())
+	task.StopWhenDone()
+	<-runDone
+	settle()
+
+	params, err := (&anthropicadapter.Adapter{}).LLMInvocationParams(convo, adapter.Options{})
+	if err != nil {
+		t.Fatalf("LLMInvocationParams: %v", err)
+	}
+	if len(params.Messages) != 2 {
+		t.Fatalf("messages = %+v, want the user turn and one assistant turn", params.Messages)
+	}
+	content := params.Messages[1].Content
+	if len(content) != 2 {
+		t.Fatalf("assistant content = %+v, want the thinking block and the reply", content)
+	}
+	if th := content[0].OfThinking; th == nil || th.Thinking != "The menu has tea." || th.Signature != "sig" {
+		t.Errorf("block 0 = %+v, want the thinking block with its signature", content[0])
+	}
+	if tx := content[1].OfText; tx == nil || tx.Text != "We have tea." {
+		t.Errorf("block 1 = %+v, want the reply", content[1])
 	}
 }
 
