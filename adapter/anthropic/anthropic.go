@@ -168,6 +168,16 @@ func toMessage(m frames.Message) (sdk.MessageParam, bool, error) {
 	}
 }
 
+// The keys of the conversation message a thought is kept as. The assistant
+// aggregator writes it when a provider asks for its reasoning back, and this
+// adapter turns it into a thinking block.
+const (
+	thoughtKeyType      = "type"
+	thoughtKeyText      = "text"
+	thoughtKeySignature = "signature"
+	thoughtType         = "thought"
+)
+
 // Thought is a reasoning block the model produced, kept in the conversation so
 // it can be handed back on the next turn.
 //
@@ -182,26 +192,63 @@ type Thought struct {
 }
 
 // NewThought builds a conversation message carrying a reasoning block, written
-// for Anthropic and sent to no other provider.
+// for Anthropic and sent to no other provider. It is the same message the
+// assistant aggregator writes for a thought the Anthropic service streamed.
 func NewThought(t Thought) frames.Message {
-	return adapter.CreateLLMSpecificMessage(&Adapter{}, t)
+	return adapter.CreateLLMSpecificMessage(&Adapter{}, map[string]any{
+		thoughtKeyType:      thoughtType,
+		thoughtKeyText:      t.Text,
+		thoughtKeySignature: t.Signature,
+	})
 }
 
 // nativeMessage reads a message written for Anthropic. It is either a thought,
 // which becomes a thinking block, or a message already in Anthropic's format.
+//
+// A thought becomes an assistant message of its own. It is merged into the
+// assistant response it preceded afterwards, along with every other run of
+// same-role messages.
 func nativeMessage(m frames.Message) (sdk.MessageParam, bool, error) {
-	if t, ok := m.Native.(Thought); ok {
-		if t.Signature == "" {
-			// Nothing to send: the block cannot be round-tripped without the
-			// signature the API decrypts it by.
+	if t, ok := m.Native.(map[string]any); ok && t[thoughtKeyType] == thoughtType {
+		// A thinking block is valid to Anthropic only with a signature: it carries
+		// the encrypted reasoning the API decrypts when the block is passed back,
+		// and a block without one cannot be round-tripped.
+		signature, _ := t[thoughtKeySignature].(string)
+		if signature == "" {
 			return sdk.MessageParam{}, false, nil
 		}
-		return sdk.NewAssistantMessage(
-			sdk.NewThinkingBlock(t.Signature, t.Text),
-		), true, nil
+		text, _ := t[thoughtKeyText].(string)
+		return sdk.NewAssistantMessage(sdk.NewThinkingBlock(signature, text)), true, nil
 	}
 	native, err := adapter.NativeMessage[sdk.MessageParam](m)
-	return native, err == nil, err
+	if err != nil {
+		return sdk.MessageParam{}, false, err
+	}
+	// The message belongs to the conversation, which other conversions read at
+	// the same time, and the request built from it is edited from here on:
+	// merged with its neighbors, marked for caching. It is copied whole so none
+	// of that reaches the conversation's own.
+	copied, err := deepCopy(native)
+	if err != nil {
+		return sdk.MessageParam{}, false, err
+	}
+	return copied, true, nil
+}
+
+// deepCopy returns a message sharing nothing with msg. A content block union
+// holds its block by pointer, so copying the struct, or even its slice of
+// blocks, would still leave both pointing at the same blocks. The message is
+// round-tripped through its wire form, which is what it is sent as anyway.
+func deepCopy(msg sdk.MessageParam) (sdk.MessageParam, error) {
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return sdk.MessageParam{}, err
+	}
+	var out sdk.MessageParam
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return sdk.MessageParam{}, err
+	}
+	return out, nil
 }
 
 // toolCallMessage renders an assistant turn that requested tool calls.
