@@ -1,8 +1,9 @@
 // Package opus wraps the Opus codec for jargo's audio path: it decodes Opus
 // packets to PCM on the way in and encodes PCM to Opus packets on the way out.
 //
-// The codec runs at 48 kHz — the rate WebRTC negotiates for Opus — so audio
-// crosses the transport without resampling. Encoding produces 20 ms frames, the
+// The codec runs at 48 kHz, the rate WebRTC negotiates for Opus. Decoding
+// produces 48 kHz PCM, while the encoder takes PCM at whatever rate it was
+// configured for and converts it itself. Encoding produces 20 ms frames, the
 // standard WebRTC packetization.
 //
 // Both the decoder and the encoder are pure Go, so the package needs no cgo:
@@ -35,10 +36,24 @@ const (
 // FrameBytes is the size in bytes of one 20 ms S16LE frame for channels.
 func FrameBytes(channels int) int { return FrameSamples * channels * 2 }
 
+// FrameBytesAt is the size in bytes of one 20 ms S16LE frame for channels at
+// sampleRate, which is what Encode takes from an Encoder fed at that rate.
+func FrameBytesAt(sampleRate, channels int) int {
+	return sampleRate / framesPerSecond * channels * 2
+}
+
+// framesPerSecond is how many 20 ms frames make up one second.
+const framesPerSecond = int(time.Second / FrameDuration)
+
 // EncoderConfig configures an Encoder.
 type EncoderConfig struct {
 	// Channels is the number of channels in the PCM handed to Encode.
 	Channels int
+	// SampleRate is the rate in Hz of the PCM handed to Encode; 0 means
+	// SampleRate (48 kHz). The encoder converts it to the rate the codec runs
+	// at, so a stream produced at its own rate is encoded without first being
+	// brought to 48 kHz. It must divide into whole 20 ms frames.
+	SampleRate int
 	// Bitrate is the target bitrate in bits per second; 0 uses the codec
 	// default. Speech is transparent well below the codec's fullband range, so
 	// raising this past ~32 kbps for a single voice mostly costs bandwidth.

@@ -9,30 +9,41 @@ import (
 	pion "github.com/pion/opus"
 )
 
-var errFrameSize = errors.New("opus: wrong frame size")
+var (
+	errFrameSize  = errors.New("opus: wrong frame size")
+	errSampleRate = errors.New("opus: sample rate does not divide into 20 ms frames")
+)
 
 // silkInternalRate is SILK's wideband internal sample rate. Encode resamples the
-// 48 kHz stream down to it, encodes, and the browser's Opus decoder plays the
+// stream it is fed to it, encodes, and the browser's Opus decoder plays the
 // SILK-only packets back at 48 kHz.
 const silkInternalRate = 16000
 
 // silkFrame is the number of 16 kHz samples in one 20 ms frame.
 const silkFrame = silkInternalRate / 1000 * 20 // 320
 
-// Encoder encodes 48 kHz S16LE PCM into Opus packets using the pure-Go pion SILK
-// encoder. SILK is tuned for speech and needs no cgo. The 48 kHz input is
-// downmixed to mono and resampled to 16 kHz with the pure-Go resampler, then
-// encoded as wideband SILK.
+// Encoder encodes S16LE PCM into Opus packets using the pure-Go pion SILK
+// encoder. SILK is tuned for speech and needs no cgo. The input, 48 kHz unless
+// the config names another rate, is downmixed to mono and resampled to 16 kHz
+// with the pure-Go resampler, then encoded as wideband SILK.
 type Encoder struct {
-	enc      *pion.Encoder
-	down     *resample.Resampler
-	channels int
-	buf      []int16 // 16 kHz mono samples awaiting a full frame
-	out      []byte
+	enc        *pion.Encoder
+	down       *resample.Resampler
+	channels   int
+	frameBytes int
+	buf        []int16 // 16 kHz mono samples awaiting a full frame
+	out        []byte
 }
 
-// NewEncoder builds a SILK Encoder for 48 kHz audio from cfg.
+// NewEncoder builds a SILK Encoder from cfg.
 func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
+	rate := cfg.SampleRate
+	if rate <= 0 {
+		rate = SampleRate
+	}
+	if rate%framesPerSecond != 0 {
+		return nil, fmt.Errorf("%w: %d Hz", errSampleRate, rate)
+	}
 	bitrate := cfg.Bitrate
 	if bitrate <= 0 {
 		bitrate = 24000
@@ -41,25 +52,28 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new silk encoder: %w", err)
 	}
-	down, err := resample.New(SampleRate, silkInternalRate, 1)
+	down, err := resample.New(rate, silkInternalRate, 1)
 	if err != nil {
 		return nil, fmt.Errorf("new silk resampler: %w", err)
 	}
 
-	return &Encoder{enc: enc, down: down, channels: cfg.Channels, out: make([]byte, maxPacketBytes)}, nil
+	return &Encoder{
+		enc: enc, down: down, channels: cfg.Channels,
+		frameBytes: FrameBytesAt(rate, cfg.Channels), out: make([]byte, maxPacketBytes),
+	}, nil
 }
 
-// Encode encodes exactly one 20 ms frame of interleaved S16LE PCM — that is
-// FrameBytes(channels) bytes — into a single SILK-only Opus packet.
+// Encode encodes exactly one 20 ms frame of interleaved S16LE PCM at the
+// encoder's rate (FrameBytesAt that rate and its channels) into a single
+// SILK-only Opus packet.
 func (e *Encoder) Encode(pcm []byte) ([]byte, error) {
-	if len(pcm) != FrameBytes(e.channels) {
-		return nil, fmt.Errorf("%w: got %d bytes, want %d", errFrameSize, len(pcm), FrameBytes(e.channels))
+	if len(pcm) != e.frameBytes {
+		return nil, fmt.Errorf("%w: got %d bytes, want %d", errFrameSize, len(pcm), e.frameBytes)
 	}
 
-	// Downmix to mono, resample 48 kHz -> 16 kHz (stateful), and reframe to
-	// exactly one 320-sample SILK frame. At the exact 3:1 ratio the resampler
-	// yields 320 samples per 20 ms in steady state; only the first call is short,
-	// which the zero-padding below covers.
+	// Downmix to mono, resample to 16 kHz (stateful), and reframe to exactly one
+	// 320-sample SILK frame. A 20 ms frame in yields 320 samples in steady
+	// state; only the first call is short, which the zero-padding below covers.
 	e.buf = append(e.buf, bytesToI16(e.down.Process(monoBytes(pcm, e.channels)))...)
 
 	frame := make([]int16, silkFrame)

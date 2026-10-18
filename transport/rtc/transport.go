@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gojargo/jargo/audio/opus"
+	"github.com/gojargo/jargo/audio/resample"
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/transport"
@@ -42,11 +43,14 @@ func (t *Transport) Input() processor.Processor { return t.in }
 func (t *Transport) Output() processor.Processor { return t.out }
 
 // inputTransport reads Opus RTP from the connection, decodes it to PCM, and
-// pushes InputAudioRawFrames into the pipeline.
+// pushes InputAudioRawFrames into the pipeline at the input sample rate.
 type inputTransport struct {
 	*transport.BaseInput
 	conn *Connection
 	dec  *opus.Decoder
+	// resampler converts the 48 kHz the codec decodes to into the rate the
+	// transport reads at. It passes audio through when the two match.
+	resampler *resample.Resampler
 
 	readWG     sync.WaitGroup
 	mu         sync.Mutex // guards readCancel
@@ -68,11 +72,20 @@ func channels(n int) int {
 
 // StartReading decodes incoming audio on its own goroutine.
 func (in *inputTransport) StartReading(ctx context.Context) error {
-	dec, err := opus.NewDecoder(channels(in.Params().AudioInChannels))
+	ch := channels(in.Params().AudioInChannels)
+	dec, err := opus.NewDecoder(ch)
+	if err != nil {
+		return err
+	}
+	// The decoded audio is one continuous stream, so the resampler keeps its
+	// filter history for as long as the session lasts.
+	r, err := resample.NewWithConfig(opus.SampleRate, in.sampleRate(), ch,
+		resample.Config{ClearAfter: resample.NeverClear})
 	if err != nil {
 		return err
 	}
 	in.dec = dec
+	in.resampler = r
 
 	readCtx, cancel := context.WithCancel(ctx)
 	in.mu.Lock()
@@ -118,7 +131,20 @@ func (in *inputTransport) StopReading(context.Context) error {
 		cancel()
 	}
 	in.readWG.Wait()
+	if in.resampler != nil {
+		in.resampler.Close()
+		in.resampler = nil
+	}
 	return nil
+}
+
+// sampleRate is the rate the transport reads at, falling back to the codec's
+// own rate when none was settled.
+func (in *inputTransport) sampleRate() int {
+	if r := in.SampleRate(); r > 0 {
+		return r
+	}
+	return opus.SampleRate
 }
 
 func (in *inputTransport) readLoop(ctx context.Context) {
@@ -129,6 +155,7 @@ func (in *inputTransport) readLoop(ctx context.Context) {
 		return
 	}
 	ch := channels(in.Params().AudioInChannels)
+	rate := in.sampleRate()
 
 	for {
 		if ctx.Err() != nil {
@@ -151,7 +178,13 @@ func (in *inputTransport) readLoop(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		in.PushAudioFrame(ctx, frames.NewInputAudioRawFrame(pcm, opus.SampleRate, ch))
+		// The codec always decodes at 48 kHz; the pipeline gets the rate it
+		// asked for.
+		pcm = in.resampler.Process(pcm)
+		if len(pcm) == 0 {
+			continue
+		}
+		in.PushAudioFrame(ctx, frames.NewInputAudioRawFrame(pcm, rate, ch))
 	}
 }
 
@@ -225,6 +258,9 @@ type outputTransport struct {
 	conn *Connection
 	enc  *opus.Encoder
 	tail []byte
+	// frameBytes is the size of one 20 ms frame at the output sample rate. The
+	// sender runs at that rate and the encoder brings it to the codec's own.
+	frameBytes int
 
 	mu      sync.Mutex
 	queue   chan []byte
@@ -303,9 +339,14 @@ func (out *outputTransport) startSending() error {
 	}
 	ch := channels(out.Params().AudioOutChannels)
 	p := out.Params()
+	rate := out.SampleRate()
+	if rate <= 0 {
+		rate = opus.SampleRate
+	}
 	enc, err := opus.NewEncoder(opus.EncoderConfig{
-		Channels: ch,
-		Bitrate:  p.AudioOutBitrate,
+		Channels:   ch,
+		SampleRate: rate,
+		Bitrate:    p.AudioOutBitrate,
 	})
 	if err != nil {
 		return err
@@ -313,12 +354,13 @@ func (out *outputTransport) startSending() error {
 	// The encoder is touched only by the sender goroutine from here on, so
 	// packets cannot be sent in a different order than they were encoded.
 	out.enc = enc
+	out.frameBytes = opus.FrameBytesAt(rate, ch)
 	out.queue = make(chan []byte, queuedFrames)
 	ctx, cancel := context.WithCancel(context.Background())
 	out.cancel = cancel
 	out.running = true
 	out.sendWG.Add(1)
-	go out.sendLoop(ctx, opus.FrameBytes(ch))
+	go out.sendLoop(ctx, out.frameBytes)
 	return nil
 }
 
@@ -485,7 +527,7 @@ func (out *outputTransport) WriteAudio(ctx context.Context, f frames.OutputAudio
 		// The outgoing track is not live, so there is nowhere to send it.
 		return false, nil
 	}
-	frameBytes := opus.FrameBytes(channels(out.Params().AudioOutChannels))
+	frameBytes := out.frameBytes
 	out.tail = append(out.tail, pcm...)
 	var batch [][]byte
 	for len(out.tail) >= frameBytes {
