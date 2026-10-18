@@ -183,7 +183,7 @@ func (s *Service) Generate(ctx context.Context, convo *frames.LLMContext, emit l
 	// call and a reported call would be the provider inventing one.
 	params.Tools = nil
 	s.StartTTFBMetrics()
-	stream := s.client.Messages.NewStreaming(ctx, params)
+	stream := s.client.Messages.NewStreaming(ctx, params, interleavedThinking())
 	for stream.Next() {
 		event := stream.Current()
 		if carriesModelOutput(event) {
@@ -254,6 +254,19 @@ func (s *Service) pushThought(ctx context.Context, event sdk.MessageStreamEventU
 	return s.PushFrame(ctx, f, processor.Downstream)
 }
 
+// interleavedThinkingBeta is the Anthropic beta that lets a model think between
+// the tool calls of one turn, rather than only before the first of them.
+const interleavedThinkingBeta = "interleaved-thinking-2025-05-14"
+
+// interleavedThinking opts a request into interleaved thinking. Every request
+// carries it, whether or not thinking is configured: it changes nothing for a
+// model that does not think, and a model that thinks by default needs it to
+// keep reasoning across a sequence of tool calls. It is added to any beta the
+// caller already asked for rather than replacing it.
+func interleavedThinking() option.RequestOption {
+	return option.WithHeaderAdd("anthropic-beta", interleavedThinkingBeta)
+}
+
 // carriesModelOutput reports whether a stream event holds output the model
 // produced. The events that open the stream (message_start, ping) carry none,
 // so TTFB ends at the first content block. A thinking block counts: reasoning
@@ -280,7 +293,7 @@ func (s *Service) GenerateWithTools(ctx context.Context, convo *frames.LLMContex
 
 	var acc sdk.Message
 	s.StartTTFBMetrics()
-	stream := s.client.Messages.NewStreaming(ctx, params)
+	stream := s.client.Messages.NewStreaming(ctx, params, interleavedThinking())
 	for stream.Next() {
 		event := stream.Current()
 		if carriesModelOutput(event) {
@@ -341,7 +354,7 @@ func (s *Service) RunInference(
 		}
 		params.OutputConfig.Format = sdk.JSONOutputFormatParam{Schema: m}
 	}
-	msg, err := s.client.Messages.New(ctx, params)
+	msg, err := s.client.Messages.New(ctx, params, interleavedThinking())
 	if err != nil {
 		return "", llm.AsCompletionTimeout(ctx, err)
 	}
