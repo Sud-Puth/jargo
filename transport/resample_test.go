@@ -50,6 +50,16 @@ func drainWrites(t *testing.T, o *fakeOutput, quiet time.Duration) []byte {
 	}
 }
 
+// drainStream reads off a stream that is expected to produce audio. It waits
+// for the first write before the quiet window starts, so a frame that takes a
+// while to reach the send loop (on a loaded machine, say) is not read as a
+// stream that wrote nothing.
+func drainStream(t *testing.T, o *fakeOutput, quiet time.Duration) []byte {
+	t.Helper()
+	first := recvWrite(t, o)
+	return append(first, drainWrites(t, o, quiet)...)
+}
+
 // TestBaseOutputResamplesAudioToTheTransportRate covers audio arriving at a
 // different rate from the one the transport started at. Half-rate audio has to
 // come out about twice as long, because the samples are being spread over the
@@ -71,7 +81,7 @@ func TestBaseOutputResamplesAudioToTheTransportRate(t *testing.T) {
 	const in = 9600
 	task.QueueFrame(frames.NewOutputAudioRawFrame(dcPCM(in), 24000, 1))
 
-	got := drainWrites(t, o, 200*time.Millisecond)
+	got := drainStream(t, o, 200*time.Millisecond)
 
 	// Unconverted, the same audio would fill 5 chunks. Anything at or below
 	// that means the frame went out at its own rate.
@@ -106,7 +116,7 @@ func TestBaseOutputRebuildsTheResamplerWhenTheInputRateChanges(t *testing.T) {
 
 	// First stream at 24 kHz builds the resampler.
 	task.QueueFrame(frames.NewOutputAudioRawFrame(dcPCM(in), 24000, 1))
-	first := drainWrites(t, o, 200*time.Millisecond)
+	first := drainStream(t, o, 200*time.Millisecond)
 	if len(first) <= in {
 		t.Fatalf("first stream wrote %d bytes for %d bytes in, want about twice: it was not resampled", len(first), in)
 	}
@@ -115,7 +125,7 @@ func TestBaseOutputRebuildsTheResamplerWhenTheInputRateChanges(t *testing.T) {
 	// 28800 bytes at 48 kHz: three times the input, not the two the resampler
 	// was built for.
 	task.QueueFrame(frames.NewOutputAudioRawFrame(dcPCM(in), 16000, 1))
-	second := drainWrites(t, o, 200*time.Millisecond)
+	second := drainStream(t, o, 200*time.Millisecond)
 
 	// A resampler carried over from the 24 kHz stream would double the audio
 	// instead of tripling it, landing near 19200 bytes. The bound sits between
@@ -193,7 +203,7 @@ func TestBaseOutputKeepsSpeechIntactAcrossAPauseBetweenChunks(t *testing.T) {
 	}
 	task.QueueFrame(frames.NewTTSStoppedFrame())
 
-	got := drainWrites(t, o, 300*time.Millisecond)
+	got := drainStream(t, o, 300*time.Millisecond)
 
 	// Every stream starts by filling the filter, so the level ramps up once at
 	// the very beginning. That is the conversion working, not audio lost, so the

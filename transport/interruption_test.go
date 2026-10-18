@@ -369,7 +369,7 @@ func TestBaseOutputInterruptionDoesNotReplayAbortedAudio(t *testing.T) {
 	// over from the turn that was cut short.
 	queue(constant(-8000, 8000))
 	task.QueueFrame(frames.NewTTSStoppedFrame())
-	after := drainWrites(t, o, 300*time.Millisecond)
+	after := drainStream(t, o, 300*time.Millisecond)
 
 	if len(after) == 0 {
 		t.Fatal("nothing was written for the next turn")
