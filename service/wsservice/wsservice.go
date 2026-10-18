@@ -278,6 +278,12 @@ func (b *Base) TryReconnect(ctx context.Context, report ReportError) bool {
 	var lastErr error
 	for attempt := 1; attempt <= b.maxRetries; attempt++ {
 		ok, err := b.reconnectWebsocket(ctx, attempt)
+		if ctx.Err() != nil {
+			// The session ended while this was redialing. The attempt did not
+			// fail, it was stopped, so there is nothing to report.
+			slog.Debug("websocket reconnection stopped with the session", "attempt", attempt)
+			return false
+		}
 		switch {
 		case err != nil:
 			lastErr = err
@@ -300,6 +306,11 @@ func (b *Base) TryReconnect(ctx context.Context, report ReportError) bool {
 		}
 		b.sleep(ctx, network.ExponentialBackoffTime(attempt,
 			b.minWait, b.maxWait, network.DefaultMultiplier))
+		if ctx.Err() != nil {
+			// Stopped while waiting out the backoff.
+			slog.Debug("websocket reconnection stopped with the session", "attempt", attempt)
+			return false
+		}
 	}
 
 	message := fmt.Sprintf("failed to reconnect after %d attempts", b.maxRetries)

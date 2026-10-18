@@ -690,6 +690,56 @@ func TestReconnectBackoffBoundsAreConfigurable(t *testing.T) {
 	}
 }
 
+// TestReconnectStopsWhenCanceledDuringTheBackoff covers the session ending while
+// a reconnect waits out its backoff. The retrying stops there, with no further
+// redial and no report: the connection did not fail, the session was stopped.
+func TestReconnectStopsWhenCanceledDuringTheBackoff(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := &handler{connect: func(int) error { return errRefused }}
+	rec := newRecorder()
+	b := newTestBase(t, h, newClock())
+	b.sleep = func(context.Context, time.Duration) { cancel() }
+
+	if b.TryReconnect(ctx, rec.report) {
+		t.Fatal("reconnect claimed success with the session stopped")
+	}
+	if _, connects, _ := h.counts(); connects != 1 {
+		t.Errorf("redialed %d times, want 1: nothing is redialed once the session ends", connects)
+	}
+	if got := rec.all(); len(got) != 1 {
+		t.Errorf("reported %v, want only the failed attempt and no report of giving up", got)
+	}
+}
+
+// TestReconnectStopsWhenCanceledDuringARedial covers the session ending while a
+// redial is in flight. The redial fails because it was stopped, which is not a
+// failed attempt to report.
+func TestReconnectStopsWhenCanceledDuringARedial(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h := &handler{connect: func(int) error {
+		cancel()
+		return context.Canceled
+	}}
+	rec := newRecorder()
+	b := newTestBase(t, h, newClock())
+
+	if b.TryReconnect(ctx, rec.report) {
+		t.Fatal("reconnect claimed success with the session stopped")
+	}
+	if _, connects, _ := h.counts(); connects != 1 {
+		t.Errorf("redialed %d times, want 1", connects)
+	}
+	if got := rec.all(); len(got) != 0 {
+		t.Errorf("reported %v, want nothing for a redial the session stopped", got)
+	}
+}
+
 // TestReconnectBackoffDefaultsToTheStandardBounds covers a caller that sets
 // neither bound getting the four-to-ten-second window.
 func TestReconnectBackoffDefaultsToTheStandardBounds(t *testing.T) {
