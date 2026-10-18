@@ -355,22 +355,65 @@ func (b *Base) startAudioContexts(ctx context.Context) {
 // queued is dropped, which is what an interruption or a cancel wants; a graceful
 // end goes through drainAudioContexts instead.
 func (b *Base) stopAudioContexts() {
+	if b.stopAudioContextLoop() {
+		b.abandonOpenAudioContexts()
+	}
+}
+
+// stopAudioContextLoop cancels the drain goroutine and waits for it, leaving the
+// contexts it had not finished registered. It reports whether a goroutine was
+// running.
+func (b *Base) stopAudioContextLoop() bool {
 	cancel := b.ctxCancel
 	b.ctxCancel = nil
 	if cancel == nil {
-		return
+		return false
 	}
 	cancel()
 	b.ctxWG.Wait()
-	b.abandonOpenAudioContexts()
+	return true
+}
+
+// interruptAudioContexts drops every open context for an interruption. The
+// provider is told about each one while it is still registered, so a hook that
+// looks the context up still finds it, and only then is the context removed.
+// The one being played is among them: the drain loop leaves it in place when it
+// is cut off.
+func (b *Base) interruptAudioContexts(ctx context.Context) {
+	b.stopAudioContextLoop()
+	b.audioCtxMu.Lock()
+	if b.serial != nil {
+		b.serial.reset()
+	}
+	b.audioCtxMu.Unlock()
+	interrupter, _ := b.syn.(AudioContextInterrupter)
+	for _, id := range b.openAudioContexts() {
+		if interrupter != nil {
+			interrupter.OnAudioContextInterrupted(ctx, id)
+		}
+		b.removeInterruptedAudioContext(id)
+	}
+}
+
+// removeInterruptedAudioContext forgets a context an interruption dropped and
+// closes its span as cut off.
+func (b *Base) removeInterruptedAudioContext(contextID string) {
+	b.audioCtxMu.Lock()
+	c := b.audioContexts[contextID]
+	delete(b.audioContexts, contextID)
+	delete(b.audioRemainders, contextID)
+	delete(b.ttsContexts, contextID)
+	b.audioCtxMu.Unlock()
+	if c != nil {
+		b.abandonAudioContext(c)
+	}
 }
 
 // abandonOpenAudioContexts closes the spans of the contexts still open once the
-// drain loop has stopped. The context that was playing closed its own span on
-// the way out; these are the ones queued behind it, which an interruption drops
-// without ever speaking. Their spans would otherwise stay open and never be
-// exported, so the utterance the user cut off would vanish from the trace
-// instead of being recorded as cut off.
+// drain loop has stopped: the one that was playing and the ones queued behind
+// it, which are dropped without being spoken in full. Their spans would
+// otherwise stay open and never be exported, so the utterance cut off would
+// vanish from the trace instead of being recorded as cut off.
 func (b *Base) abandonOpenAudioContexts() {
 	b.audioCtxMu.Lock()
 	open := b.audioContexts
@@ -746,7 +789,11 @@ func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
 		if it.contextID == "" {
 			continue
 		}
-		b.handleAudioContext(ctx, it.contextID)
+		if !b.handleAudioContext(ctx, it.contextID) {
+			// Cut off mid-play: the context stays registered so whoever stopped
+			// the loop can report it interrupted rather than completed.
+			return
+		}
 		b.deleteAudioContext(it.contextID)
 		b.deleteTTSContext(it.contextID)
 		if c, ok := b.syn.(AudioContextCompleter); ok {
@@ -757,11 +804,12 @@ func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
 
 // handleAudioContext pushes one context's frames downstream until the context is
 // marked finished, or until it has been idle long enough to be taken as
-// finished on its own.
-func (b *Base) handleAudioContext(ctx context.Context, contextID string) {
+// finished on its own. It reports false when the loop was canceled before the
+// context ended.
+func (b *Base) handleAudioContext(ctx context.Context, contextID string) bool {
 	c := b.audioContextFor(contextID)
 	if c == nil {
-		return
+		return true
 	}
 	shouldPushStop := false
 	// Whether any audio arrived for this context at all, which is what says the
@@ -773,7 +821,7 @@ func (b *Base) handleAudioContext(ctx context.Context, contextID string) {
 			break
 		}
 		if !ok {
-			return
+			return false
 		}
 		if it.keepalive {
 			continue
@@ -818,6 +866,7 @@ func (b *Base) handleAudioContext(ctx context.Context, contextID string) {
 	b.releaseResponseEnd(ctx, contextID)
 	b.finishAudioContext(ctx, c)
 	b.recordContextAudioOutcome(ctx, contextID, receivedAudio)
+	return true
 }
 
 // releaseResponseEnd reports the end of the model's response now that the audio

@@ -913,17 +913,7 @@ func (b *Base) handleInterruption(ctx context.Context) {
 	b.audioCtxMu.Lock()
 	b.wordLastPTS = 0
 	b.audioCtxMu.Unlock()
-	b.stopAudioContexts()
-	b.audioCtxMu.Lock()
-	if b.serial != nil {
-		b.serial.reset()
-	}
-	b.audioCtxMu.Unlock()
-	if c, ok := b.syn.(AudioContextInterrupter); ok {
-		for _, id := range b.openAudioContexts() {
-			c.OnAudioContextInterrupted(ctx, id)
-		}
-	}
+	b.interruptAudioContexts(ctx)
 	b.startAudioContexts(ctx)
 	// The frame goroutine may be paused here: an interruption arriving while an
 	// uninterruptible frame was being handled flushes the queue but leaves the
