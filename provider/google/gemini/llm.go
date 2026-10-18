@@ -18,8 +18,10 @@ import (
 	"github.com/gojargo/jargo/adapter"
 	geminiadapter "github.com/gojargo/jargo/adapter/gemini"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/service/llm"
 	errs "github.com/gojargo/jargo/utils/errors"
+	"github.com/google/uuid"
 )
 
 // RequestShaper customizes how a generateContent request is addressed and
@@ -84,13 +86,35 @@ func NewShapedLLM(name string, shaper RequestShaper, cfg Config) *Service {
 	return s
 }
 
-// genPart is one part of a candidate's content: text or a function call.
+// genPart is one part of a candidate's content: text, a thought, a function
+// call or inline data, any of which the model may sign.
 type genPart struct {
-	Text         string `json:"text"`
-	FunctionCall *struct {
+	// Text is nil when the part carries none, which a signed trailing chunk is
+	// told apart by: its text is present and empty.
+	Text *string `json:"text"`
+	// Thought marks text that is a summary of the model's reasoning rather than
+	// part of its answer.
+	Thought bool `json:"thought"`
+	// ThoughtSignature is the opaque signature the model put on this part, which
+	// it expects back on the same part on the next turn.
+	ThoughtSignature string `json:"thoughtSignature"` //nolint:tagliatelle // Gemini REST uses camelCase keys
+	FunctionCall     *struct {
+		ID   string          `json:"id"`
 		Name string          `json:"name"`
 		Args json.RawMessage `json:"args"`
 	} `json:"functionCall"` //nolint:tagliatelle // Gemini REST uses camelCase keys
+	InlineData *struct {
+		MimeType string `json:"mimeType"` //nolint:tagliatelle // Gemini REST uses camelCase keys
+		Data     string `json:"data"`
+	} `json:"inlineData"` //nolint:tagliatelle // Gemini REST uses camelCase keys
+}
+
+// text returns the part's text, empty when it carries none.
+func (p genPart) text() string {
+	if p.Text == nil {
+		return ""
+	}
+	return *p.Text
 }
 
 // genChunk is the subset of a streamGenerateContent SSE chunk we read.
@@ -159,8 +183,9 @@ func (s *Service) RunInference(
 	}
 	for _, c := range answer.Candidates {
 		for _, p := range c.Content.Parts {
-			if p.Text != "" {
-				return p.Text, nil
+			// A thought is the model reasoning, not its answer.
+			if p.text() != "" && !p.Thought {
+				return p.text(), nil
 			}
 		}
 	}
@@ -386,17 +411,117 @@ func (s *Service) newRequestTo(
 }
 
 func (s *Service) stream(req *http.Request, emit llm.Emit) error {
-	return s.streamChunks(req, func(chunk genChunk) error {
-		for _, c := range chunk.Candidates {
-			for _, p := range c.Content.Parts {
-				if err := emit(p.Text); err != nil {
-					return err
-				}
+	rs := &responseStream{s: s, ctx: req.Context(), text: emit}
+	return s.streamChunks(req, rs.consume)
+}
+
+// responseStream reads the parts of one streamed response: answer text goes to
+// text, thoughts and thought signatures go downstream as frames, and each
+// function call goes to tool.
+type responseStream struct {
+	s   *Service
+	ctx context.Context //nolint:containedctx // scoped to one response
+	// text receives each chunk of the answer.
+	text func(string) error
+	// tool receives each function call. It is nil when no tools were
+	// advertised, and a call is then not reported.
+	tool func(frames.ToolCall) error
+	// accumulated is the answer text so far, which a signature on a text part
+	// is bookmarked by.
+	accumulated strings.Builder
+}
+
+// consume reads every part of a chunk.
+func (r *responseStream) consume(chunk genChunk) error {
+	for _, c := range chunk.Candidates {
+		for _, p := range c.Content.Parts {
+			if err := r.part(p); err != nil {
+				return err
 			}
-			s.handleFinishReason(c.FinishReason)
 		}
+		r.s.handleFinishReason(c.FinishReason)
+	}
+	return nil
+}
+
+// part reads one streamed part.
+func (r *responseStream) part(p genPart) error {
+	var callID string
+	switch {
+	case p.text() != "":
+		if p.Thought {
+			// Gemini sends whole thoughts rather than chunks of one, so each is
+			// bracketed in a start and an end of its own.
+			return r.pushThought(p)
+		}
+		r.accumulated.WriteString(p.text())
+		if err := r.text(p.text()); err != nil {
+			return err
+		}
+	case p.FunctionCall != nil:
+		callID = p.FunctionCall.ID
+		if callID == "" {
+			callID = uuid.NewString()
+		}
+		if r.tool != nil {
+			args := p.FunctionCall.Args
+			if len(args) == 0 {
+				args = json.RawMessage("{}")
+			}
+			if err := r.tool(frames.ToolCall{ID: callID, Name: p.FunctionCall.Name, Args: args}); err != nil {
+				return err
+			}
+		}
+	}
+	return r.keepThoughtSignature(p, callID)
+}
+
+// pushThought pushes a thought part as a whole thought.
+func (r *responseStream) pushThought(p genPart) error {
+	if err := r.s.PushFrame(r.ctx, frames.NewLLMThoughtStartFrame(), processor.Downstream); err != nil {
+		return err
+	}
+	if err := r.s.PushFrame(r.ctx, frames.NewLLMThoughtTextFrame(p.text()), processor.Downstream); err != nil {
+		return err
+	}
+	if err := r.s.PushFrame(r.ctx, frames.NewLLMThoughtEndFrame(), processor.Downstream); err != nil {
+		return err
+	}
+	return r.keepThoughtSignature(p, "")
+}
+
+// keepThoughtSignature writes the signature a part carries into the
+// conversation, bookmarked so the adapter can put it back on the right part
+// when the conversation is sent again.
+//
+// Gemini 2.5 signs function calls and then the last part of every response
+// after the first call; Gemini 3 signs the last part of every response. The
+// response is streamed, though, and a text part may arrive in several chunks:
+// the signature can come with the first chunk, or in a trailing chunk whose
+// text is empty. A text bookmark therefore holds all the answer text seen so
+// far in this response.
+func (r *responseStream) keepThoughtSignature(p genPart, callID string) error {
+	if p.ThoughtSignature == "" {
 		return nil
-	})
+	}
+	var bookmark map[string]any
+	switch {
+	case p.FunctionCall != nil:
+		bookmark = map[string]any{geminiadapter.BookmarkFunctionCall: callID}
+	case p.InlineData != nil && p.InlineData.Data != "":
+		bookmark = map[string]any{geminiadapter.BookmarkInlineData: map[string]any{
+			"mimeType": p.InlineData.MimeType, "data": p.InlineData.Data,
+		}}
+	case p.Text != nil:
+		bookmark = map[string]any{geminiadapter.BookmarkText: r.accumulated.String()}
+	default:
+		slog.WarnContext(r.ctx, "thought signature found on an unhandled part type",
+			"service", r.s.Name())
+		return nil
+	}
+	msg := geminiadapter.NewThoughtSignature(p.ThoughtSignature, bookmark)
+	return r.s.PushFrame(r.ctx,
+		frames.NewLLMMessagesAppendFrame([]frames.Message{msg}), processor.Downstream)
 }
 
 // streamChunks issues req and hands each chunk of the streamed answer to onChunk,
@@ -547,56 +672,12 @@ func (s *Service) GenerateWithTools(ctx context.Context, convo *frames.LLMContex
 	return s.streamTools(req, sink)
 }
 
-// geminiToolStream consumes streamed parts, forwarding text and assigning each
-// functionCall a synthetic id (Gemini has none; results are paired by name).
-type geminiToolStream struct {
-	sink llm.Sink
-	idx  int
-}
-
-// part forwards one streamed part to the sink.
-func (t *geminiToolStream) part(p genPart) error {
-	if p.Text != "" {
-		if err := t.sink.Text(p.Text); err != nil {
-			return err
-		}
-	}
-	if p.FunctionCall == nil {
-		return nil
-	}
-	args := p.FunctionCall.Args
-	if len(args) == 0 {
-		args = json.RawMessage("{}")
-	}
-	id := fmt.Sprintf("call_%d", t.idx)
-	t.idx++
-	return t.sink.Tool(frames.ToolCall{ID: id, Name: p.FunctionCall.Name, Args: args})
-}
-
-// consume forwards every part of a chunk to the sink.
-func (t *geminiToolStream) consume(chunk genChunk) error {
-	for _, c := range chunk.Candidates {
-		for _, p := range c.Content.Parts {
-			if err := t.part(p); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // streamTools streams a tool-capable completion, forwarding text and tool calls.
+// A call is reported under the id Gemini gave it, or a fresh one when it gave
+// none, so its result can be paired back with it.
 func (s *Service) streamTools(req *http.Request, sink llm.Sink) error {
-	ts := &geminiToolStream{sink: sink}
-	return s.streamChunks(req, func(chunk genChunk) error {
-		if err := ts.consume(chunk); err != nil {
-			return err
-		}
-		for _, c := range chunk.Candidates {
-			s.handleFinishReason(c.FinishReason)
-		}
-		return nil
-	})
+	rs := &responseStream{s: s, ctx: req.Context(), text: sink.Text, tool: sink.Tool}
+	return s.streamChunks(req, rs.consume)
 }
 
 // LLMAdapter returns the adapter this service converts through, so the base can

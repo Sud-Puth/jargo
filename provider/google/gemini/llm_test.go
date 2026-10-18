@@ -421,13 +421,13 @@ func TestGenerateWithToolsOmitsToolsWhenNoneDeclared(t *testing.T) {
 }
 
 // TestGenerateWithToolsReportsCalls checks the streamed path end to end: text
-// reaches the sink and each functionCall is reported with a synthetic id, Gemini
-// supplying none of its own.
+// reaches the sink and each functionCall is reported under the id Gemini gave
+// it, or a fresh one when it gave none.
 func TestGenerateWithToolsReportsCalls(t *testing.T) {
 	srv := newGenServer(t, sse(
 		textChunk("Let me check. "),
 		`{"candidates":[{"content":{"parts":[`+
-			`{"functionCall":{"name":"get_weather","args":{"location":"Paris"}}},`+
+			`{"functionCall":{"id":"fc-1","name":"get_weather","args":{"location":"Paris"}}},`+
 			`{"functionCall":{"name":"get_time"}}]}}]}`,
 	))
 	svc := NewShapedLLM("GoogleLLM", &testShaper{base: srv.URL}, Config{APIKey: "k"})
@@ -442,12 +442,12 @@ func TestGenerateWithToolsReportsCalls(t *testing.T) {
 	if len(sink.calls) != 2 {
 		t.Fatalf("calls = %+v, want both function calls", sink.calls)
 	}
-	if sink.calls[0].ID != "call_0" || sink.calls[0].Name != "get_weather" ||
+	if sink.calls[0].ID != "fc-1" || sink.calls[0].Name != "get_weather" ||
 		string(sink.calls[0].Args) != `{"location":"Paris"}` {
 		t.Errorf("first call = %+v (args %s)", sink.calls[0], sink.calls[0].Args)
 	}
 	// A call with no arguments still has to carry an object.
-	if sink.calls[1].ID != "call_1" || sink.calls[1].Name != "get_time" ||
+	if sink.calls[1].ID == "" || sink.calls[1].ID == "fc-1" || sink.calls[1].Name != "get_time" ||
 		string(sink.calls[1].Args) != "{}" {
 		t.Errorf("second call = %+v (args %s)", sink.calls[1], sink.calls[1].Args)
 	}

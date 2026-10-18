@@ -40,7 +40,9 @@ func TestGeminiToolStreamParsesParts(t *testing.T) {
 	}
 
 	sink := &fakeSink{}
-	ts := &geminiToolStream{sink: sink}
+	ts := &responseStream{
+		s: NewLLM(Config{APIKey: "k"}), ctx: t.Context(), text: sink.Text, tool: sink.Tool,
+	}
 	if err := ts.consume(chunk); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestGeminiToolStreamParsesParts(t *testing.T) {
 		t.Errorf("call wrong: %+v (args %s)", c, c.Args)
 	}
 	if c.ID == "" {
-		t.Error("expected a synthetic call id")
+		t.Error("expected a fresh call id for a call Gemini gave none")
 	}
 }
 
