@@ -235,6 +235,9 @@ type Base struct {
 	// holds each open context's queue. See audiocontext.go.
 	audioCtxMu    sync.Mutex
 	audioContexts map[string]*audioContext
+	// audioCtxSeq numbers contexts as they are created, so the open ones can be
+	// listed in creation order.
+	audioCtxSeq uint64
 	// ttsContexts records what each context carries beyond its audio. It is read
 	// on the drain goroutine, long after the call that set it, which is why the
 	// answers are kept here rather than passed along with each frame.

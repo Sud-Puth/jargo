@@ -1,7 +1,9 @@
 package tts
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +125,9 @@ type audioContext struct {
 	mu     sync.Mutex
 	items  []ctxItem
 	notify chan struct{}
+
+	// seq is the context's place in creation order.
+	seq uint64
 
 	start time.Time
 	rate  int
@@ -471,7 +476,15 @@ func (b *Base) CreateAudioContext(contextID string) {
 	if b.audioContexts == nil {
 		b.audioContexts = map[string]*audioContext{}
 	}
-	b.audioContexts[contextID] = newAudioContext(b.syn.SampleRate(), b.BeginTTFB(), spanCtx, span)
+	c := newAudioContext(b.syn.SampleRate(), b.BeginTTFB(), spanCtx, span)
+	if old, ok := b.audioContexts[contextID]; ok {
+		// A context opened again under the same id keeps its place.
+		c.seq = old.seq
+	} else {
+		b.audioCtxSeq++
+		c.seq = b.audioCtxSeq
+	}
+	b.audioContexts[contextID] = c
 	serial := b.serial
 	b.audioCtxMu.Unlock()
 	if serial != nil {
@@ -715,7 +728,8 @@ func (b *Base) hasOpenAudioContexts() bool {
 	return len(b.audioContexts) > 0
 }
 
-// openAudioContexts lists the contexts still open, for an interruption.
+// openAudioContexts lists the contexts still open in the order they were
+// created, for an interruption.
 func (b *Base) openAudioContexts() []string {
 	b.audioCtxMu.Lock()
 	defer b.audioCtxMu.Unlock()
@@ -723,6 +737,9 @@ func (b *Base) openAudioContexts() []string {
 	for id := range b.audioContexts {
 		out = append(out, id)
 	}
+	slices.SortFunc(out, func(x, y string) int {
+		return cmp.Compare(b.audioContexts[x].seq, b.audioContexts[y].seq)
+	})
 	return out
 }
 

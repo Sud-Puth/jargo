@@ -79,9 +79,10 @@ func (s *hookSynth) OnAudioContextCompleted(_ context.Context, contextID string)
 }
 
 // TestInterruptionReportsOpenContextsToProvider covers the provider hook an
-// interruption runs: the context being played and the one queued behind it are
-// each reported interrupted, while still open, and neither is reported
-// completed. Speech requested after the interruption still plays.
+// interruption runs: the context being played and the ones queued behind it are
+// each reported interrupted, in the order they were created and while still
+// open, and none is reported completed. Speech requested after the
+// interruption still plays.
 func TestInterruptionReportsOpenContextsToProvider(t *testing.T) {
 	synth := &hookSynth{}
 	base := tts.New("HookTTS", synth)
@@ -102,10 +103,12 @@ func TestInterruptionReportsOpenContextsToProvider(t *testing.T) {
 
 	task.QueueFrame(frames.NewTTSSpeakFrame("One."))
 	task.QueueFrame(frames.NewTTSSpeakFrame("Two."))
+	task.QueueFrame(frames.NewTTSSpeakFrame("Three."))
+	task.QueueFrame(frames.NewTTSSpeakFrame("Four."))
 	time.Sleep(80 * time.Millisecond)
 	task.QueueFrame(frames.NewInterruptionFrame())
 	time.Sleep(50 * time.Millisecond)
-	task.QueueFrame(frames.NewTTSSpeakFrame("Three."))
+	task.QueueFrame(frames.NewTTSSpeakFrame("Five."))
 	time.Sleep(400 * time.Millisecond)
 	task.QueueFrame(frames.NewEndFrame())
 	select {
@@ -117,31 +120,32 @@ func TestInterruptionReportsOpenContextsToProvider(t *testing.T) {
 
 	synth.mu.Lock()
 	defer synth.mu.Unlock()
-	if len(synth.requests) != 3 {
-		t.Fatalf("requests = %v, want three", synth.requests)
+	if len(synth.requests) != 5 {
+		t.Fatalf("requests = %v, want five", synth.requests)
 	}
-	first, second, third := synth.requests[0], synth.requests[1], synth.requests[2]
-	interrupted := slices.Clone(synth.interrupted)
-	slices.Sort(interrupted)
-	want := []string{first, second}
-	slices.Sort(want)
-	if !slices.Equal(interrupted, want) {
-		t.Fatalf("interrupted = %v, want the playing and the queued context %v", synth.interrupted, want)
+	// The first is playing and the next three are queued behind it; all four
+	// are reported, in the order they were created.
+	cut, after := synth.requests[:4], synth.requests[4]
+	if !slices.Equal(synth.interrupted, cut) {
+		t.Fatalf("interrupted = %v, want the playing and the queued contexts in creation order %v",
+			synth.interrupted, cut)
 	}
 	for i, open := range synth.openOnHook {
 		if !open {
 			t.Errorf("context %s was already removed when reported interrupted", synth.interrupted[i])
 		}
 	}
-	if slices.Contains(synth.completed, first) || slices.Contains(synth.completed, second) {
-		t.Errorf("completed = %v, an interrupted context must not be reported completed", synth.completed)
+	for _, id := range cut {
+		if slices.Contains(synth.completed, id) {
+			t.Errorf("completed = %v, an interrupted context must not be reported completed", synth.completed)
+		}
 	}
-	if !slices.Contains(synth.completed, third) {
-		t.Errorf("completed = %v, want the speech after the interruption %s", synth.completed, third)
+	if !slices.Contains(synth.completed, after) {
+		t.Errorf("completed = %v, want the speech after the interruption %s", synth.completed, after)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if audioFor[third] == 0 {
+	if audioFor[after] == 0 {
 		t.Errorf("no audio played for the speech requested after the interruption")
 	}
 }
