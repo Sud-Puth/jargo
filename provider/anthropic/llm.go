@@ -37,6 +37,9 @@ type Service struct {
 	// reports whether it was configured (an unset union means "omit").
 	thinking    sdk.ThinkingConfigParamUnion
 	thinkingSet bool
+	// omitInterleavedThinking leaves the interleaved-thinking beta off every
+	// request, for a backend that does not take it.
+	omitInterleavedThinking bool
 }
 
 // NewLLM builds an Anthropic LLM service.
@@ -75,6 +78,8 @@ func NewLLMWithOptions(name string, cfg Config, extra ...option.RequestOption) *
 		model:       sdk.ModelClaudeHaiku4_5,
 		maxTokens:   defaultMaxTokens,
 		cachePrompt: true,
+
+		omitInterleavedThinking: cfg.OmitInterleavedThinkingBeta,
 	}
 	if cfg.Model != "" {
 		s.model = cfg.Model
@@ -183,7 +188,7 @@ func (s *Service) Generate(ctx context.Context, convo *frames.LLMContext, emit l
 	// call and a reported call would be the provider inventing one.
 	params.Tools = nil
 	s.StartTTFBMetrics()
-	stream := s.client.Messages.NewStreaming(ctx, params, interleavedThinking())
+	stream := s.client.Messages.NewStreaming(ctx, params, s.requestOpts()...)
 	for stream.Next() {
 		event := stream.Current()
 		if carriesModelOutput(event) {
@@ -267,6 +272,16 @@ func interleavedThinking() option.RequestOption {
 	return option.WithHeaderAdd("anthropic-beta", interleavedThinkingBeta)
 }
 
+// requestOpts is what every request this service makes is sent with: the
+// interleaved-thinking beta, unless the service was built for a backend that
+// does not take it.
+func (s *Service) requestOpts() []option.RequestOption {
+	if s.omitInterleavedThinking {
+		return nil
+	}
+	return []option.RequestOption{interleavedThinking()}
+}
+
 // carriesModelOutput reports whether a stream event holds output the model
 // produced. The events that open the stream (message_start, ping) carry none,
 // so TTFB ends at the first content block. A thinking block counts: reasoning
@@ -293,7 +308,7 @@ func (s *Service) GenerateWithTools(ctx context.Context, convo *frames.LLMContex
 
 	var acc sdk.Message
 	s.StartTTFBMetrics()
-	stream := s.client.Messages.NewStreaming(ctx, params, interleavedThinking())
+	stream := s.client.Messages.NewStreaming(ctx, params, s.requestOpts()...)
 	for stream.Next() {
 		event := stream.Current()
 		if carriesModelOutput(event) {
@@ -354,7 +369,7 @@ func (s *Service) RunInference(
 		}
 		params.OutputConfig.Format = sdk.JSONOutputFormatParam{Schema: m}
 	}
-	msg, err := s.client.Messages.New(ctx, params, interleavedThinking())
+	msg, err := s.client.Messages.New(ctx, params, s.requestOpts()...)
 	if err != nil {
 		return "", llm.AsCompletionTimeout(ctx, err)
 	}

@@ -69,6 +69,11 @@ type Config struct {
 	// Extra sets arbitrary additional top-level request-body fields not modeled
 	// above (e.g. beta parameters), applied to every request.
 	Extra map[string]any
+	// OmitInterleavedThinkingBeta leaves the interleaved-thinking beta off every
+	// request. The Anthropic API takes it on any request; a backend that serves
+	// the same models through an API of its own (Amazon Bedrock) may reject a
+	// beta a model does not support, so a service built for one sets this.
+	OmitInterleavedThinkingBeta bool
 }
 
 // Validate reports whether the configuration is usable.

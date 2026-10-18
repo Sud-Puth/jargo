@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/gojargo/jargo/provider/anthropic"
@@ -26,16 +28,18 @@ func (c Config) loadOptions() []func(*awsconfig.LoadOptions) error {
 
 // anthropicConfig maps the Bedrock config onto the Anthropic provider's config.
 // APIKey and BaseURL are left empty: auth and addressing come from the Bedrock
-// SDK option instead.
+// SDK option instead. The interleaved-thinking beta is left off: Bedrock may
+// reject a beta the model does not support.
 func (c Config) anthropicConfig() anthropic.Config {
 	return anthropic.Config{
-		Model:               c.Model,
-		MaxTokens:           c.MaxTokens,
-		Temperature:         c.Temperature,
-		TopP:                c.TopP,
-		TopK:                c.TopK,
-		RequestTimeout:      c.RequestTimeout,
-		EnablePromptCaching: c.EnablePromptCaching,
+		Model:                       c.Model,
+		MaxTokens:                   c.MaxTokens,
+		Temperature:                 c.Temperature,
+		TopP:                        c.TopP,
+		TopK:                        c.TopK,
+		RequestTimeout:              c.RequestTimeout,
+		EnablePromptCaching:         c.EnablePromptCaching,
+		OmitInterleavedThinkingBeta: true,
 	}
 }
 
@@ -47,5 +51,12 @@ func NewLLM(ctx context.Context, cfg Config) (*anthropic.Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return anthropic.NewLLMWithOptions("BedrockLLM", cfg.anthropicConfig(), bedrock.WithConfig(awsCfg)), nil
+	return newLLM(cfg, awsCfg), nil
+}
+
+// newLLM builds the service from a loaded AWS config. extra is appended after
+// the Bedrock option, which is how a test points the service at a stub.
+func newLLM(cfg Config, awsCfg aws.Config, extra ...option.RequestOption) *anthropic.Service {
+	opts := append([]option.RequestOption{bedrock.WithConfig(awsCfg)}, extra...)
+	return anthropic.NewLLMWithOptions("BedrockLLM", cfg.anthropicConfig(), opts...)
 }

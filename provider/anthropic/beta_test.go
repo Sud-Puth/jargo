@@ -97,3 +97,19 @@ func TestEveryRequestOptsIntoInterleavedThinking(t *testing.T) {
 		}
 	}
 }
+
+// TestOmitInterleavedThinkingBeta checks a service built for a backend that
+// does not take the beta sends none.
+func TestOmitInterleavedThinkingBeta(t *testing.T) {
+	rec := &betaRecorder{}
+	srv := rec.server(t, false)
+	svc := NewLLM(Config{APIKey: "k", BaseURL: srv.URL, OmitInterleavedThinkingBeta: true})
+	convo := frames.NewLLMContext("sys")
+	convo.AddUserMessage("hi")
+	if _, err := svc.RunInference(t.Context(), convo, llm.InferenceOptions{}); err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if got := rec.only(t); got != "" {
+		t.Errorf("anthropic-beta = %q, want none", got)
+	}
+}
