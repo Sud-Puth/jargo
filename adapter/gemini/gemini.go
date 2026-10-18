@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	"github.com/gojargo/jargo/adapter"
 	"github.com/gojargo/jargo/frames"
@@ -19,8 +20,38 @@ const (
 	keyText             = "text"
 	keyID               = "id"
 	keyFunctionCall     = "functionCall"
+	keyFunctionResponse = "functionResponse"
+	keyInlineData       = "inlineData"
+	keyData             = "data"
 	keyThoughtSignature = "thoughtSignature"
 )
+
+// The keys of the conversation message the Gemini service keeps a thought
+// signature in. Gemini signs a part of its response, and expects the signature
+// back on that same part when the conversation is sent again. The bookmark is
+// what finds the part: the id of a function call, the text of the response so
+// far, or the inline data the part carried.
+const (
+	keyType              = "type"
+	keySignature         = "signature"
+	keyBookmark          = "bookmark"
+	typeThoughtSignature = "thought_signature"
+	BookmarkFunctionCall = "function_call"
+	BookmarkText         = "text"
+	BookmarkInlineData   = "inline_data"
+)
+
+// NewThoughtSignature builds the conversation message keeping a thought
+// signature Gemini put on a part of its response, written for Gemini and sent
+// to no other provider. bookmark identifies the part, under one of the
+// Bookmark keys.
+func NewThoughtSignature(signature any, bookmark map[string]any) frames.Message {
+	return adapter.CreateLLMSpecificMessage(&Adapter{}, map[string]any{
+		keyType:      typeThoughtSignature,
+		keySignature: signature,
+		keyBookmark:  bookmark,
+	})
+}
 
 // The roles Gemini's contents take. It calls the assistant the model, and has
 // no system or developer input role: a message in either enters as the user.
@@ -108,9 +139,14 @@ func (a *Adapter) LLMInvocationParams(
 // the user, Gemini having neither input role. Tool turns become functionCall
 // parts (model) and functionResponse parts (user), paired by the call id
 // carried on both.
+//
+// A message written for Gemini is either a thought signature the service kept
+// for a part of an earlier model turn, which is put back on that part, or a
+// content already in Gemini's format, which is copied in as it stands.
 func ToContents(msgs []frames.Message) ([]map[string]any, error) {
 	names := toolCallNames(msgs)
 	out := make([]map[string]any, 0, len(msgs))
+	var signatures []map[string]any
 	for _, m := range msgs {
 		switch {
 		case m.IsLLMSpecific():
@@ -118,7 +154,16 @@ func ToContents(msgs []frames.Message) ([]map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, native)
+			if native[keyType] == typeThoughtSignature {
+				signatures = append(signatures, native)
+				continue
+			}
+			// The content belongs to the conversation, which other conversions
+			// read at the same time, and the request built from it is edited from
+			// here on: signatures are put on its parts. It is copied whole so none
+			// of that reaches the conversation's own.
+			copied, _ := deepCopy(native).(map[string]any)
+			out = append(out, copied)
 		case len(m.ToolResults) > 0:
 			out = append(out, map[string]any{
 				keyRole: roleUser, keyParts: toolResultParts(m.ToolResults, names),
@@ -135,6 +180,8 @@ func ToContents(msgs []frames.Message) ([]map[string]any, error) {
 			out = append(out, textContent(role, m.Text))
 		}
 	}
+	applyThoughtSignatures(signatures, out)
+	out = mergeParallelToolCallsForThinking(signatures, out)
 	addPlaceholderThoughtSignatures(out)
 	return out, nil
 }
@@ -168,21 +215,269 @@ func addPlaceholderThoughtSignatures(contents []map[string]any) {
 // anySigned reports whether any of the parts already carries a signature.
 func anySigned(parts []map[string]any) bool {
 	for _, part := range parts {
-		switch sig := part[keyThoughtSignature].(type) {
-		case nil:
-		case string:
-			if sig != "" {
-				return true
-			}
-		case []byte:
-			if len(sig) > 0 {
-				return true
-			}
-		default:
+		if present(part[keyThoughtSignature]) {
 			return true
 		}
 	}
 	return false
+}
+
+// present reports whether a value is set to something: neither missing nor
+// empty.
+func present(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case string:
+		return v != ""
+	case []byte:
+		return len(v) > 0
+	case map[string]any:
+		return len(v) > 0
+	default:
+		return true
+	}
+}
+
+// contentParts returns a content's parts, in the form this adapter builds them.
+func contentParts(content map[string]any) []map[string]any {
+	parts, _ := content[keyParts].([]map[string]any)
+	return parts
+}
+
+// applyThoughtSignatures puts each kept thought signature back on the part of
+// the model turn it was given for.
+//
+// The signatures are in the order the model produced them, and so are the
+// model turns, so each search starts past the turn the previous signature was
+// put on. A signature always belongs to the last part of its turn.
+func applyThoughtSignatures(signatures, contents []map[string]any) {
+	if len(signatures) == 0 {
+		return
+	}
+	var model []map[string]any
+	for _, c := range contents {
+		if role, _ := c[keyRole].(string); role == roleModel {
+			model = append(model, c)
+		}
+	}
+
+	applied, start := 0, 0
+	for _, ts := range signatures {
+		signature := ts[keySignature]
+		bookmark, _ := ts[keyBookmark].(map[string]any)
+		if !present(signature) || len(bookmark) == 0 {
+			continue
+		}
+		for i := start; i < len(model); i++ {
+			parts := contentParts(model[i])
+			if len(parts) == 0 {
+				continue
+			}
+			last := parts[len(parts)-1]
+			if bookmarkMatchesPart(bookmark, last) {
+				last[keyThoughtSignature] = signature
+				applied++
+				start = i + 1
+				break
+			}
+		}
+	}
+	slog.Debug("applied thought signatures", "kept", len(signatures), "applied", applied)
+}
+
+// bookmarkMatchesPart reports whether a signature's bookmark identifies part.
+func bookmarkMatchesPart(bookmark, part map[string]any) bool {
+	if id, _ := bookmark[BookmarkFunctionCall].(string); id != "" {
+		call, _ := part[keyFunctionCall].(map[string]any)
+		got, _ := call[keyID].(string)
+		return call != nil && got == id
+	}
+	if text, _ := bookmark[BookmarkText].(string); text != "" {
+		return textBookmarkMatches(text, part)
+	}
+	if blob, _ := bookmark[BookmarkInlineData].(map[string]any); len(blob) > 0 {
+		return inlineDataBookmarkMatches(blob, part)
+	}
+	slog.Warn("unknown thought signature bookmark", "bookmark", bookmark)
+	return false
+}
+
+// textBookmarkMatches reports whether a text part is the one a text bookmark
+// recorded. Whitespace is normalized before comparing, and a prefix either way
+// matches: the part is cut short when the response was interrupted, and the
+// bookmark holds only the text seen so far when the signature arrived early.
+func textBookmarkMatches(bookmark string, part map[string]any) bool {
+	text, _ := part[keyText].(string)
+	if text == "" {
+		return false
+	}
+	want := strings.Join(strings.Fields(bookmark), " ")
+	got := strings.Join(strings.Fields(text), " ")
+	return got == want || strings.HasPrefix(want, got) || strings.HasPrefix(got, want)
+}
+
+// inlineDataBookmarkMatches reports whether an inline-data part is the one a
+// bookmark recorded. Comparing the length of the data is enough, the search
+// already running in strict turn order, and comparing the data itself would be
+// expensive.
+func inlineDataBookmarkMatches(bookmark, part map[string]any) bool {
+	blob, _ := part[keyInlineData].(map[string]any)
+	if blob == nil {
+		return false
+	}
+	got, okGot := dataLen(blob[keyData])
+	want, okWant := dataLen(bookmark[keyData])
+	return okGot && okWant && got == want
+}
+
+// dataLen measures inline data in bytes, whether it is held raw or in the
+// base64 form it travels in.
+func dataLen(v any) (int, bool) {
+	switch d := v.(type) {
+	case []byte:
+		return len(d), true
+	case string:
+		if raw, err := base64.StdEncoding.DecodeString(d); err == nil {
+			return len(raw), true
+		}
+		return len(d), true
+	default:
+		return 0, false
+	}
+}
+
+// mergeParallelToolCallsForThinking regroups a batch of parallel tool calls
+// into one model turn, and their results into the one user turn after it.
+//
+// Gemini expects each side of a parallel batch in a single content: all the
+// functionCall parts in one model turn, all the matching functionResponse parts
+// in the following user turn. Vertex AI rejects a request whose counts differ;
+// the Gemini API is more lenient but documents the grouped form. The
+// conversation keeps each call, and each result, as a message of its own, so a
+// batch arrives split and is put back together here.
+//
+// It only matters with thinking on, and only then can it be done: the model
+// signs the first call of a parallel batch and only that one, so a signed call
+// starts a group and the unsigned calls after it belong to it, while each of a
+// run of sequential calls carries a signature of its own. Any other message
+// found inside a group is kept and put back after it.
+func mergeParallelToolCallsForThinking(signatures, contents []map[string]any) []map[string]any {
+	if len(contents) == 0 {
+		return contents
+	}
+	// Whether any signature is bookmarked to a function call answers both
+	// whether thinking is on and whether the conversation has calls at all.
+	callSigned := false
+	for _, ts := range signatures {
+		if bookmark, _ := ts[keyBookmark].(map[string]any); present(bookmark[BookmarkFunctionCall]) {
+			callSigned = true
+			break
+		}
+	}
+	if !callSigned {
+		return contents
+	}
+
+	merged := make([]map[string]any, 0, len(contents))
+	for i := 0; i < len(contents); {
+		current := contents[i]
+		if !isToolCallContent(current) || !anySigned(contentParts(current)) {
+			merged = append(merged, current)
+			i++
+			continue
+		}
+
+		calls := append([]map[string]any(nil), contentParts(current)...)
+		var responses []map[string]any
+		var others []map[string]any
+		j := i + 1
+	scan:
+		for ; j < len(contents); j++ {
+			next := contents[j]
+			switch {
+			case isToolCallContent(next):
+				if anySigned(contentParts(next)) {
+					// A new parallel group starts here.
+					break scan
+				}
+				calls = append(calls, contentParts(next)...)
+			case isToolResponseContent(next):
+				responses = append(responses, contentParts(next)...)
+			default:
+				others = append(others, next)
+			}
+		}
+		merged = append(merged, map[string]any{keyRole: roleModel, keyParts: calls})
+		if len(responses) > 0 {
+			merged = append(merged, map[string]any{keyRole: roleUser, keyParts: responses})
+		}
+		merged = append(merged, others...)
+		i = j
+	}
+	return merged
+}
+
+// isToolCallContent reports whether a content is a model turn made only of
+// function calls.
+func isToolCallContent(c map[string]any) bool {
+	return onlyPartsWith(c, roleModel, keyFunctionCall)
+}
+
+// isToolResponseContent reports whether a content is a user turn made only of
+// function responses.
+func isToolResponseContent(c map[string]any) bool {
+	return onlyPartsWith(c, roleUser, keyFunctionResponse)
+}
+
+// onlyPartsWith reports whether a content in role has parts, every one of them
+// carrying key.
+func onlyPartsWith(c map[string]any, role, key string) bool {
+	if r, _ := c[keyRole].(string); r != role {
+		return false
+	}
+	parts := contentParts(c)
+	if len(parts) == 0 {
+		return false
+	}
+	for _, p := range parts {
+		if !present(p[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+// deepCopy copies the maps and slices of a content written for Gemini, so the
+// copy shares nothing that a conversion writes into. Anything else is a value
+// no conversion edits and is carried over as it stands.
+func deepCopy(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			out[k] = deepCopy(val)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(t))
+		for i, val := range t {
+			out[i], _ = deepCopy(val).(map[string]any)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = deepCopy(val)
+		}
+		return out
+	case json.RawMessage:
+		return append(json.RawMessage(nil), t...)
+	case []byte:
+		return append([]byte(nil), t...)
+	default:
+		return v
+	}
 }
 
 // EnsureLastMessageIsUser appends a minimal user content when the conversation
@@ -364,6 +659,18 @@ func (a *Adapter) MessagesForLogging(convo *frames.LLMContext) []map[string]any 
 	params, err := a.LLMInvocationParams(convo, adapter.Options{})
 	if err != nil {
 		return nil
+	}
+	// The contents were built for this call and share nothing with the
+	// conversation, so the opaque and bulky values are elided in place.
+	for _, c := range params.Contents {
+		for _, part := range contentParts(c) {
+			if blob, ok := part[keyInlineData].(map[string]any); ok {
+				blob[keyData] = "..."
+			}
+			if _, ok := part[keyThoughtSignature]; ok {
+				part[keyThoughtSignature] = "..."
+			}
+		}
 	}
 	return params.Contents
 }
