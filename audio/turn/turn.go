@@ -9,6 +9,8 @@
 // the user's audio and asks it, when speech stops, whether the turn is over.
 package turn
 
+import "time"
+
 // EndOfTurnState is the result of end-of-turn analysis.
 type EndOfTurnState int
 
@@ -25,6 +27,20 @@ func (s EndOfTurnState) String() string {
 		return "complete"
 	}
 	return "incomplete"
+}
+
+// MetricsData is what an end-of-turn model decided about a turn and what it
+// cost to decide. An analyzer reports it only for a prediction the model
+// actually made.
+type MetricsData struct {
+	// Processor names the analyzer that made the prediction.
+	Processor string
+	// Complete is whether the turn was predicted to be finished.
+	Complete bool
+	// Probability is the model's confidence that it was finished, in [0,1].
+	Probability float64
+	// E2EProcessing is how long the prediction took.
+	E2EProcessing time.Duration
 }
 
 // Default timing parameters, matching the Smart Turn defaults jargo ports.
@@ -67,8 +83,9 @@ type Analyzer interface {
 	// and Clear puts it back to false.
 	SpeechTriggered() bool
 	// AnalyzeEndOfTurn runs the model over the buffered turn audio and returns
-	// the predicted state and the model's completion probability in [0,1].
-	AnalyzeEndOfTurn() (EndOfTurnState, float64, error)
+	// the predicted state, with the metrics of the prediction. The metrics are
+	// nil when the model did not run, because there was no audio to judge.
+	AnalyzeEndOfTurn() (EndOfTurnState, *MetricsData, error)
 	// UpdateVADStartSecs informs the analyzer of the VAD start delay so it can
 	// align its pre-speech buffering.
 	UpdateVADStartSecs(secs float64)

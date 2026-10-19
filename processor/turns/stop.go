@@ -46,9 +46,6 @@ type TurnAnalyzerConfig struct {
 	WaitForTranscript *bool
 }
 
-// analyzerMetricsProcessor labels the metrics an end-of-turn analyzer produces.
-const analyzerMetricsProcessor = "TurnAnalyzer"
-
 // TurnAnalyzerStop ends a turn using an end-of-turn model fed the user's audio,
 // gated on a finalized transcript (or a safety-net timeout). This is the
 // Smart-Turn stop strategy.
@@ -121,9 +118,9 @@ func (s *TurnAnalyzerStop) Process(f frames.Frame) ProcessFrameResult {
 		if s.analyzer.AppendAudio(fr.Audio, s.vadSpeaking) == turn.Complete {
 			// A streaming analyzer decides inside AppendAudio, and a batch one
 			// reports Complete here only on the silence safety net. Either way the
-			// prediction is consumed now, while it is fresh.
-			_, prob, err := s.analyzer.AnalyzeEndOfTurn()
-			s.reportPrediction(true, prob, err)
+			// metrics are consumed now, while they are fresh.
+			_, metrics, _ := s.analyzer.AnalyzeEndOfTurn()
+			s.handlePredictionResult(metrics)
 			s.turnComplete = true
 			s.maybeTrigger()
 		}
@@ -160,9 +157,8 @@ func (s *TurnAnalyzerStop) handleVADStopped(fr *frames.VADUserStoppedSpeakingFra
 	// armed.
 	deadline := s.sttDeadline(fr)
 
-	start := time.Now()
-	state, prob, err := s.analyzer.AnalyzeEndOfTurn()
-	s.reportPrediction(state == turn.Complete, prob, err, start)
+	state, metrics, err := s.analyzer.AnalyzeEndOfTurn()
+	s.handlePredictionResult(metrics)
 	s.turnComplete = err == nil && state == turn.Complete
 
 	s.armTimeoutFor(max(0, time.Until(deadline)))
@@ -232,23 +228,22 @@ func (s *TurnAnalyzerStop) armTimeoutFor(d time.Duration) {
 	})
 }
 
-// reportPrediction emits what the analyzer decided, so a turn that ended on the
-// safety-net timeout can be told from one the analyzer judged unfinished.
-func (s *TurnAnalyzerStop) reportPrediction(complete bool, prob float64, err error, start ...time.Time) {
-	if err != nil || s.env.push == nil {
+// handlePredictionResult emits the metrics of a prediction the analyzer made, so
+// a turn that ended on the safety-net timeout can be told from one the analyzer
+// judged unfinished. There are none when the model did not run, and then
+// nothing is emitted.
+func (s *TurnAnalyzerStop) handlePredictionResult(m *turn.MetricsData) {
+	if m == nil || s.env.push == nil {
 		return
 	}
-	turn := frames.TurnMetricsData{
-		Processor:   analyzerMetricsProcessor,
-		Complete:    complete,
-		Probability: prob,
-	}
-	if len(start) > 0 {
-		turn.E2EProcessing = time.Since(start[0])
-	}
 	slog.Debug("end of turn prediction",
-		"complete", complete, "probability", prob, "took", turn.E2EProcessing)
-	s.env.push(frames.NewMetricsFrame(turn), processor.Downstream)
+		"complete", m.Complete, "probability", m.Probability, "took", m.E2EProcessing)
+	s.env.push(frames.NewMetricsFrame(frames.TurnMetricsData{
+		Processor:     m.Processor,
+		Complete:      m.Complete,
+		Probability:   m.Probability,
+		E2EProcessing: m.E2EProcessing,
+	}), processor.Downstream)
 }
 
 func (s *TurnAnalyzerStop) maybeTrigger() {

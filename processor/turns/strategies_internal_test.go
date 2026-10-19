@@ -1394,9 +1394,9 @@ type slowAnalyzer struct{ took time.Duration }
 
 func (slowAnalyzer) SetSampleRate(int)                            {}
 func (slowAnalyzer) AppendAudio([]byte, bool) turn.EndOfTurnState { return turn.Incomplete }
-func (a slowAnalyzer) AnalyzeEndOfTurn() (turn.EndOfTurnState, float64, error) {
+func (a slowAnalyzer) AnalyzeEndOfTurn() (turn.EndOfTurnState, *turn.MetricsData, error) {
 	time.Sleep(a.took)
-	return turn.Complete, 0.9, nil
+	return turn.Complete, &turn.MetricsData{Complete: true, Probability: 0.9, E2EProcessing: a.took}, nil
 }
 func (slowAnalyzer) SpeechTriggered() bool      { return false }
 func (slowAnalyzer) Params() turn.Params        { return turn.DefaultParams() }

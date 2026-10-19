@@ -80,15 +80,15 @@ func TestHTTPSmartTurnReadsTheVerdict(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"prediction": 1, "probability": 0.93})
 	}, nil)
 
-	state, prob, err := a.AnalyzeEndOfTurn()
+	state, metrics, err := a.AnalyzeEndOfTurn()
 	if err != nil {
 		t.Fatalf("AnalyzeEndOfTurn: %v", err)
 	}
 	if state != Complete {
 		t.Errorf("state = %v, want complete", state)
 	}
-	if prob != 0.93 {
-		t.Errorf("probability = %v, want the one the service returned", prob)
+	if metrics == nil || metrics.Probability != 0.93 {
+		t.Errorf("metrics = %+v, want the probability the service returned", metrics)
 	}
 	if len(seen) < len(npyMagic) || string(seen[:len(npyMagic)]) != npyMagic {
 		t.Error("the posted body is not a NumPy array file")
@@ -101,15 +101,15 @@ func TestHTTPSmartTurnReadsAnIncompleteVerdict(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"prediction": 0, "probability": 0.12})
 	}, nil)
 
-	state, prob, err := a.AnalyzeEndOfTurn()
+	state, metrics, err := a.AnalyzeEndOfTurn()
 	if err != nil {
 		t.Fatalf("AnalyzeEndOfTurn: %v", err)
 	}
 	if state != Incomplete {
 		t.Errorf("state = %v, want incomplete", state)
 	}
-	if prob != 0.12 {
-		t.Errorf("probability = %v, want the one the service returned", prob)
+	if metrics == nil || metrics.Probability != 0.12 {
+		t.Errorf("metrics = %+v, want the probability the service returned", metrics)
 	}
 }
 
@@ -123,15 +123,15 @@ func TestHTTPSmartTurnTimesOut(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"prediction": 1, "probability": 0.9})
 	}, &params)
 
-	state, prob, err := a.AnalyzeEndOfTurn()
+	state, metrics, err := a.AnalyzeEndOfTurn()
 	if err != nil {
 		t.Fatalf("AnalyzeEndOfTurn: %v", err)
 	}
 	if state != Incomplete {
 		t.Errorf("state = %v, want the turn left open", state)
 	}
-	if prob != 0 {
-		t.Errorf("probability = %v, want none for a verdict that never arrived", prob)
+	if metrics == nil || metrics.Probability != 0 {
+		t.Errorf("metrics = %+v, want a zero probability for a verdict that never arrived", metrics)
 	}
 }
 
@@ -155,15 +155,15 @@ func TestHTTPSmartTurnLeavesTheTurnOpenOnAFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := httpTurn(t, tc.handler, nil)
-			state, prob, err := a.AnalyzeEndOfTurn()
+			state, metrics, err := a.AnalyzeEndOfTurn()
 			if err != nil {
 				t.Fatalf("AnalyzeEndOfTurn: %v", err)
 			}
 			if state != Incomplete {
 				t.Errorf("state = %v, want the turn left open", state)
 			}
-			if prob != 0 {
-				t.Errorf("probability = %v, want none for a verdict that never arrived", prob)
+			if metrics == nil || metrics.Probability != 0 {
+				t.Errorf("metrics = %+v, want a zero probability for a verdict that never arrived", metrics)
 			}
 		})
 	}

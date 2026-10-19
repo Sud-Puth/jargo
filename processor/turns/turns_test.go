@@ -135,8 +135,8 @@ type fakeTurn struct{}
 
 func (fakeTurn) SetSampleRate(int)                            {}
 func (fakeTurn) AppendAudio([]byte, bool) turn.EndOfTurnState { return turn.Incomplete }
-func (fakeTurn) AnalyzeEndOfTurn() (turn.EndOfTurnState, float64, error) {
-	return turn.Complete, 1, nil
+func (fakeTurn) AnalyzeEndOfTurn() (turn.EndOfTurnState, *turn.MetricsData, error) {
+	return turn.Complete, &turn.MetricsData{Complete: true, Probability: 1}, nil
 }
 func (fakeTurn) SpeechTriggered() bool      { return false }
 func (fakeTurn) Params() turn.Params        { return turn.DefaultParams() }
@@ -288,8 +288,8 @@ func TestIdleFires(t *testing.T) {
 // incompleteTurn is an analyzer that judges the turn unfinished.
 type incompleteTurn struct{ fakeTurn }
 
-func (incompleteTurn) AnalyzeEndOfTurn() (turn.EndOfTurnState, float64, error) {
-	return turn.Incomplete, 0.17, nil
+func (incompleteTurn) AnalyzeEndOfTurn() (turn.EndOfTurnState, *turn.MetricsData, error) {
+	return turn.Incomplete, &turn.MetricsData{Probability: 0.17}, nil
 }
 
 // The analyzer's verdict is reported as metrics, so a turn that ended on the

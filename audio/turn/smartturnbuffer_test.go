@@ -233,4 +233,54 @@ func TestSmartTurnSilenceClosesTheTurn(t *testing.T) {
 	if b.speechTriggered || len(b.buffer) != 0 {
 		t.Error("closing the turn left the analyzer holding state from it")
 	}
+
+	// The strategy asks for the metrics as soon as the safety net fires. The
+	// model never ran, so there are none to report.
+	state, metrics, err := b.AnalyzeEndOfTurn()
+	if err != nil {
+		t.Fatalf("AnalyzeEndOfTurn: %v", err)
+	}
+	if state != Incomplete || metrics != nil {
+		t.Errorf("after the safety net, AnalyzeEndOfTurn = (%v, %+v), want (incomplete, no metrics)", state, metrics)
+	}
+	if p.calls != 0 {
+		t.Errorf("the model was run %d times on the cleared buffer, want 0", p.calls)
+	}
+}
+
+// With no audio buffered there is nothing to run the model on, so there is no
+// prediction and no metrics.
+func TestSmartTurnWithoutAudioReportsNoMetrics(t *testing.T) {
+	b, p := newBufferTestBase(t, DefaultParams())
+
+	state, metrics, err := b.AnalyzeEndOfTurn()
+	if err != nil {
+		t.Fatalf("AnalyzeEndOfTurn: %v", err)
+	}
+	if state != Incomplete || metrics != nil {
+		t.Errorf("AnalyzeEndOfTurn = (%v, %+v), want (incomplete, no metrics)", state, metrics)
+	}
+	if p.calls != 0 {
+		t.Errorf("the model was run %d times, want 0", p.calls)
+	}
+}
+
+// A prediction the model made comes back with its metrics.
+func TestSmartTurnReportsThePredictionMetrics(t *testing.T) {
+	b, _ := newBufferTestBase(t, DefaultParams())
+	b.AppendAudio(pcmOf(16000, chunkSamples), true)
+
+	state, metrics, err := b.AnalyzeEndOfTurn()
+	if err != nil {
+		t.Fatalf("AnalyzeEndOfTurn: %v", err)
+	}
+	if state != Complete {
+		t.Errorf("state = %v, want complete", state)
+	}
+	if metrics == nil {
+		t.Fatal("no metrics for a prediction the model made")
+	}
+	if metrics.Processor != "BaseSmartTurn" || !metrics.Complete || metrics.Probability != 0.99 {
+		t.Errorf("metrics = %+v, want BaseSmartTurn, complete, probability 0.99", metrics)
+	}
 }

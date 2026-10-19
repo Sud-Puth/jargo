@@ -253,8 +253,8 @@ type stubAnalyzer struct{}
 
 func (stubAnalyzer) SetSampleRate(int)                            {}
 func (stubAnalyzer) AppendAudio([]byte, bool) turn.EndOfTurnState { return turn.Incomplete }
-func (stubAnalyzer) AnalyzeEndOfTurn() (turn.EndOfTurnState, float64, error) {
-	return turn.Incomplete, 0, nil
+func (stubAnalyzer) AnalyzeEndOfTurn() (turn.EndOfTurnState, *turn.MetricsData, error) {
+	return turn.Incomplete, nil, nil
 }
 func (stubAnalyzer) SpeechTriggered() bool      { return false }
 func (stubAnalyzer) UpdateVADStartSecs(float64) {}

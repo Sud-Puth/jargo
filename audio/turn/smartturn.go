@@ -17,6 +17,9 @@ var smartTurnModel []byte
 
 var errUnexpectedTensor = errors.New("turn: unexpected output tensor type")
 
+// smartTurnMetricsProcessor labels the metrics a smart-turn analyzer reports.
+const smartTurnMetricsProcessor = "BaseSmartTurn"
+
 // segment is one appended chunk of turn audio with the wall-clock time it
 // arrived, used to bound the buffer and to locate the pre-speech window.
 type segment struct {
@@ -103,16 +106,17 @@ func (b *smartTurnBase) AppendAudio(buffer []byte, isSpeech bool) EndOfTurnState
 }
 
 // AnalyzeEndOfTurn runs the model over the buffered turn and returns the
-// predicted state and completion probability. On Complete it clears the buffer.
-func (b *smartTurnBase) AnalyzeEndOfTurn() (EndOfTurnState, float64, error) {
-	state, prob, err := b.processSpeechSegment()
+// predicted state, with the metrics of the prediction. The metrics are nil when
+// there was no audio to run the model on. On Complete it clears the buffer.
+func (b *smartTurnBase) AnalyzeEndOfTurn() (EndOfTurnState, *MetricsData, error) {
+	state, metrics, err := b.processSpeechSegment()
 	if err != nil {
-		return Incomplete, 0, err
+		return Incomplete, nil, err
 	}
 	if state == Complete {
 		b.clear(Complete)
 	}
-	return state, prob, nil
+	return state, metrics, nil
 }
 
 // Clear resets the analyzer to its initial state.
@@ -127,9 +131,9 @@ func (b *smartTurnBase) clear(state EndOfTurnState) {
 }
 
 // processSpeechSegment assembles the analyzed audio segment and runs the model.
-func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, float64, error) {
+func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, *MetricsData, error) {
 	if len(b.buffer) == 0 {
-		return Incomplete, 0, nil
+		return Incomplete, nil, nil
 	}
 
 	// Start the segment a little before speech onset.
@@ -148,7 +152,8 @@ func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, float64, error) 
 		total += len(seg.samples)
 	}
 	if total == 0 {
-		return Incomplete, 0, nil
+		// An empty segment is not judged, so there is no prediction to report.
+		return Incomplete, nil, nil
 	}
 	audio := make([]float32, 0, total)
 	for _, seg := range b.buffer[startIndex:] {
@@ -163,14 +168,21 @@ func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, float64, error) 
 		audio = audio[len(audio)-maxSamples:]
 	}
 
+	start := time.Now()
 	complete, prob, err := b.self.predictEndpoint(audio)
 	if err != nil {
-		return Incomplete, 0, err
+		return Incomplete, nil, err
+	}
+	metrics := &MetricsData{
+		Processor:     smartTurnMetricsProcessor,
+		Complete:      complete,
+		Probability:   prob,
+		E2EProcessing: time.Since(start),
 	}
 	if complete {
-		return Complete, prob, nil
+		return Complete, metrics, nil
 	}
-	return Incomplete, prob, nil
+	return Incomplete, metrics, nil
 }
 
 // SmartTurnV3 is an end-of-turn Analyzer backed by the smart-turn-v3 ONNX model.
