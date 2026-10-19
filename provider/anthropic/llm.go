@@ -33,6 +33,9 @@ type Service struct {
 	adapter anthropicadapter.Adapter
 	// cachePrompt gates the ephemeral cache breakpoints on the prompt.
 	cachePrompt bool
+	// systemPromptCacheTTL is how long the system prompt's cache entry lives;
+	// empty leaves Anthropic's default.
+	systemPromptCacheTTL string
 	// thinking is the extended-thinking config sent on each request; thinkingSet
 	// reports whether it was configured (an unset union means "omit").
 	thinking    sdk.ThinkingConfigParamUnion
@@ -87,6 +90,7 @@ func NewLLMWithOptions(name string, cfg Config, extra ...option.RequestOption) *
 	if cfg.EnablePromptCaching != nil {
 		s.cachePrompt = *cfg.EnablePromptCaching
 	}
+	s.systemPromptCacheTTL = cfg.SystemPromptCacheTTL
 	if cfg.MaxTokens > 0 {
 		s.maxTokens = int64(cfg.MaxTokens)
 	}
@@ -137,6 +141,7 @@ func (s *Service) newParams(
 	convo *frames.LLMContext, opts adapter.Options,
 ) (sdk.MessageNewParams, error) {
 	opts.EnablePromptCaching = s.cachePrompt
+	opts.SystemPromptCacheTTL = s.systemPromptCacheTTL
 	// A model without assistant-prefill support rejects a request whose message
 	// list ends with an assistant message; give it a trailing user turn.
 	opts.EnsureLastMessageIsUser = !supportsPrefill(s.model)

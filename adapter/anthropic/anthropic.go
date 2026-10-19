@@ -83,13 +83,19 @@ func (a *Adapter) LLMInvocationParams(
 // systemBlocks renders the system prompt Anthropic is sent beside the
 // conversation.
 //
-// When the prompt comes from the conversation and caching is on, the cache
-// breakpoint goes on the part of it that survives between turns. A cached
-// prefix is only reused while it stays byte-identical, and everything after the
-// breakpoint is free to vary without disturbing it. The recalled context a
-// memory service refreshes every turn is exactly that: putting it inside the
-// breakpoint would rewrite the cache on every request and never read one back,
-// which costs more than not caching at all.
+// With caching on, the prompt carries a cache breakpoint of its own, so the
+// prompt shared by every turn (and by every conversation using the same one) is
+// cached independently of the messages. Anthropic requires a longer-lived
+// breakpoint to come before a shorter one, which the system prompt always does,
+// so it can be given a longer lifetime than the messages' breakpoints.
+//
+// When the prompt comes from the conversation, the breakpoint goes on the part
+// of it that survives between turns. A cached prefix is only reused while it
+// stays byte-identical, and everything after the breakpoint is free to vary
+// without disturbing it. The recalled context a memory service refreshes every
+// turn is exactly that: putting it inside the breakpoint would rewrite the cache
+// on every request and never read one back, which costs more than not caching
+// at all.
 func (a *Adapter) systemBlocks(
 	convo *frames.LLMContext, fromContext string, opts adapter.Options,
 ) []sdk.TextBlockParam {
@@ -97,19 +103,20 @@ func (a *Adapter) systemBlocks(
 	if resolved == "" {
 		return nil
 	}
-	// An instruction given for one call is not the conversation's prompt and has
-	// no part that survives between turns, so there is nothing to cache.
-	if !opts.EnablePromptCaching || resolved != fromContext {
+	if !opts.EnablePromptCaching {
 		return []sdk.TextBlockParam{{Text: resolved}}
+	}
+	cacheControl := systemCacheControl(opts.SystemPromptCacheTTL)
+	if resolved != fromContext {
+		// The instruction the service or the call was given: one block, cached
+		// whole.
+		return []sdk.TextBlockParam{{Text: resolved, CacheControl: cacheControl}}
 	}
 
 	stable, volatile := convo.SystemParts()
 	blocks := make([]sdk.TextBlockParam, 0, 2)
 	if stable != "" {
-		blocks = append(blocks, sdk.TextBlockParam{
-			Text:         stable,
-			CacheControl: sdk.NewCacheControlEphemeralParam(),
-		})
+		blocks = append(blocks, sdk.TextBlockParam{Text: stable, CacheControl: cacheControl})
 	}
 	if volatile != "" {
 		blocks = append(blocks, sdk.TextBlockParam{Text: volatile})
@@ -118,6 +125,14 @@ func (a *Adapter) systemBlocks(
 		return nil
 	}
 	return blocks
+}
+
+// systemCacheControl is the cache breakpoint put on the system prompt, living
+// for ttl ("5m" or "1h"); empty leaves Anthropic's default of 5 minutes.
+func systemCacheControl(ttl string) sdk.CacheControlEphemeralParam {
+	cc := sdk.NewCacheControlEphemeralParam()
+	cc.TTL = sdk.CacheControlEphemeralTTL(ttl)
+	return cc
 }
 
 // ToMessages converts the conversation's messages into Anthropic messages.

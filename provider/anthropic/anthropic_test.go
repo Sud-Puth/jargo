@@ -216,6 +216,36 @@ func TestNewParamsStillSendsRecall(t *testing.T) {
 	}
 }
 
+// The instruction the service runs under is sent on every turn, so it is cached,
+// for as long as the service was configured to cache it.
+func TestNewParamsCachesTheSystemInstruction(t *testing.T) {
+	s := NewLLM(Config{SystemPromptCacheTTL: "1h"})
+	s.SetSystemInstruction("You take coffee orders.")
+	convo := frames.NewLLMContext("")
+	convo.AddUserMessage("hi")
+
+	params, err := s.newParams(convo, adapter.Options{SystemInstruction: s.SystemInstruction()})
+	if err != nil {
+		t.Fatalf("newParams: %v", err)
+	}
+	if len(params.System) != 1 || params.System[0].Text != "You take coffee orders." {
+		t.Fatalf("system = %+v, want the instruction as one block", params.System)
+	}
+	if cc := params.System[0].CacheControl; cc.Type == "" || cc.TTL != sdk.CacheControlEphemeralTTLTTL1h {
+		t.Fatalf("cache control = %+v, want a breakpoint living an hour", cc)
+	}
+}
+
+// A cache lifetime Anthropic does not offer is refused up front.
+func TestConfigRejectsAnUnknownSystemPromptCacheTTL(t *testing.T) {
+	if err := (Config{APIKey: "k", SystemPromptCacheTTL: "2h"}).Validate(); err == nil {
+		t.Fatal("a 2h cache lifetime validated")
+	}
+	if err := (Config{APIKey: "k", SystemPromptCacheTTL: "5m"}).Validate(); err != nil {
+		t.Fatalf("a 5m cache lifetime was refused: %v", err)
+	}
+}
+
 // With caching off the system prompt travels as one uncached block.
 func TestNewParamsWithoutCaching(t *testing.T) {
 	off := false

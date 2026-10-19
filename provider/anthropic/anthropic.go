@@ -66,6 +66,14 @@ type Config struct {
 	// breakpoint so repeated turns reuse it; nil defaults to true (jargo caches
 	// for latency). Set to false to disable caching.
 	EnablePromptCaching *bool
+	// SystemPromptCacheTTL is how long the system prompt's cache entry lives
+	// when prompt caching is enabled: "5m" or "1h". Empty uses Anthropic's
+	// default of 5 minutes. "1h" keeps a system prompt shared by many
+	// conversations cached across the gaps between them, at twice the base
+	// input price per cache write instead of 1.25 times. Anthropic caches
+	// nothing when the tools and system prompt together fall below the model's
+	// minimum cacheable prompt length.
+	SystemPromptCacheTTL string `validate:"omitempty,oneof=5m 1h"`
 	// Extra sets arbitrary additional top-level request-body fields not modeled
 	// above (e.g. beta parameters), applied to every request.
 	Extra map[string]any

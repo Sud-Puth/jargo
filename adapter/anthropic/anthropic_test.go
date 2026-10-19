@@ -423,6 +423,58 @@ func TestSystemPromptKeepsTheCachedPrefixStable(t *testing.T) {
 	}
 }
 
+// TestSystemInstructionIsCached checks the instruction a service runs under is
+// cached when caching is on. It is sent on every turn, so leaving it uncached
+// pays the full input price for the same prompt over and over.
+func TestSystemInstructionIsCached(t *testing.T) {
+	convo := frames.NewLLMContext("")
+	convo.AddUserMessage("hi")
+
+	p := paramsOf(t, convo, adapter.Options{
+		SystemInstruction: "You take coffee orders.", EnablePromptCaching: true,
+	})
+	if len(p.System) != 1 || p.System[0].Text != "You take coffee orders." {
+		t.Fatalf("system = %+v, want the instruction as one block", p.System)
+	}
+	if p.System[0].CacheControl.Type == "" {
+		t.Fatal("the instruction carries no cache breakpoint")
+	}
+	if p.System[0].CacheControl.TTL != "" {
+		t.Errorf("ttl = %q, want Anthropic's default", p.System[0].CacheControl.TTL)
+	}
+}
+
+// TestSystemPromptCacheTTL checks the system prompt's breakpoint lives as long
+// as it was asked to, whether the prompt is the service's instruction or the
+// conversation's own, and that the messages' breakpoints keep the default.
+func TestSystemPromptCacheTTL(t *testing.T) {
+	instructed := frames.NewLLMContext("")
+	instructed.AddUserMessage("hi")
+	own := frames.NewLLMContext("be helpful")
+	own.AddUserMessage("hi")
+
+	for name, tc := range map[string]struct {
+		convo *frames.LLMContext
+		opts  adapter.Options
+	}{
+		"instruction": {instructed, adapter.Options{
+			SystemInstruction: "You take coffee orders.", EnablePromptCaching: true, SystemPromptCacheTTL: "1h",
+		}},
+		"conversation": {own, adapter.Options{EnablePromptCaching: true, SystemPromptCacheTTL: "1h"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := paramsOf(t, tc.convo, tc.opts)
+			if len(p.System) != 1 || p.System[0].CacheControl.TTL != sdk.CacheControlEphemeralTTLTTL1h {
+				t.Fatalf("system = %+v, want one block cached for an hour", p.System)
+			}
+			last := p.Messages[len(p.Messages)-1].Content
+			if cc := last[len(last)-1].OfText.CacheControl; cc.Type == "" || cc.TTL != "" {
+				t.Errorf("message breakpoint = %+v, want the default lifetime", cc)
+			}
+		})
+	}
+}
+
 // TestThoughtBecomesAThinkingBlock checks a reasoning block kept in the
 // conversation is handed back as a thinking block, which is what lets the model
 // carry its reasoning across a turn.

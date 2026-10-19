@@ -56,6 +56,11 @@ type Options struct {
 	// EnablePromptCaching marks the conversation so the provider caches the
 	// prompt and reads the cache back on the next turn.
 	EnablePromptCaching bool
+	// SystemPromptCacheTTL is how long the system prompt's cache entry lives
+	// when prompt caching is enabled, for a provider that caches the system
+	// prompt on its own breakpoint: "5m" or "1h". Empty leaves the provider's
+	// default.
+	SystemPromptCacheTTL string
 	// EnsureLastMessageIsUser appends a minimal user message when the converted
 	// conversation ends on an assistant message. It is for a model without
 	// assistant-prefill support, which rejects a request ending that way.
