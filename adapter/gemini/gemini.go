@@ -3,10 +3,15 @@
 package gemini
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/gojargo/jargo/adapter"
 	"github.com/gojargo/jargo/frames"
@@ -89,6 +94,18 @@ type Params struct {
 // value is ready to use.
 type Adapter struct {
 	adapter.Base
+
+	// warnedMu guards warnedSchemaAdaptations, which conversions running at
+	// once can both update.
+	warnedMu sync.Mutex
+	// warnedSchemaAdaptations are the (adaptation, tool) pairs already reported,
+	// so a tool set needing them warns once rather than on every inference.
+	warnedSchemaAdaptations map[schemaAdaptation]bool
+}
+
+// schemaAdaptation is one kind of adaptation made to one tool's schema.
+type schemaAdaptation struct {
+	note, tool string
 }
 
 // Compile-time check that the adapter satisfies the contract.
@@ -584,33 +601,49 @@ func toolResultName(r frames.ToolResult, names map[string]string) string {
 }
 
 // FunctionResponseDict shapes a tool result for Gemini's functionResponse,
-// which requires an object: a JSON object passes through, anything else is
-// wrapped as {"value": content}.
+// which requires an object. A result that decodes to a JSON object passes
+// through as it stands. Any other JSON value (null, a scalar, an array) is
+// wrapped decoded, as {"value": <value>}, and text that is not JSON at all, such
+// as the "COMPLETED" a function returning nothing reports, is wrapped as it
+// stands.
 func FunctionResponseDict(content string) any {
-	var obj map[string]any
-	if json.Unmarshal([]byte(content), &obj) == nil {
+	dec := json.NewDecoder(strings.NewReader(content))
+	dec.UseNumber()
+	var decoded any
+	if dec.Decode(&decoded) != nil || dec.More() {
+		return map[string]any{"value": content}
+	}
+	if _, ok := decoded.(map[string]any); ok {
 		return json.RawMessage(content)
 	}
-	return map[string]any{"value": content}
+	return map[string]any{"value": decoded}
 }
 
 // ToProviderToolsFormat implements adapter.LLMAdapter, rendering the standard
 // tools as Gemini functionDeclarations and appending the custom tools written
-// for Gemini beside them.
-func (*Adapter) ToProviderToolsFormat(schema frames.ToolsSchema) []map[string]any {
+// for Gemini beside them. Each tool's parameters are adapted to the subset of
+// JSON Schema Gemini accepts (see adaptSchema), and the adaptations made are
+// reported once per tool.
+func (a *Adapter) ToProviderToolsFormat(schema frames.ToolsSchema) []map[string]any {
 	var out []map[string]any
 	if len(schema.Standard) > 0 {
 		decls := make([]map[string]any, 0, len(schema.Standard))
+		adapted := map[string][]string{}
 		for _, t := range schema.Standard {
 			d := map[string]any{keyName: t.Name}
 			if t.Description != "" {
 				d["description"] = t.Description
 			}
-			if params := geminiParameters(t.Parameters); params != nil {
+			notes := map[string]bool{}
+			if params := geminiParameters(t.Parameters, notes); params != nil {
 				d["parameters"] = params
+			}
+			for note := range notes {
+				adapted[note] = append(adapted[note], t.Name)
 			}
 			decls = append(decls, d)
 		}
+		a.warnSchemaAdaptations(adapted)
 		out = append(out, map[string]any{"functionDeclarations": decls})
 	}
 	// A custom tool that cannot be read is left out rather than failing the whole
@@ -624,33 +657,145 @@ func (*Adapter) ToProviderToolsFormat(schema frames.ToolsSchema) []map[string]an
 	return append(out, custom...)
 }
 
-// geminiParameters returns the tool's JSON-Schema parameters with
-// "additionalProperties" stripped (Gemini rejects it). On a parse error the raw
-// schema passes through unchanged.
-func geminiParameters(raw json.RawMessage) any {
+// geminiParameters returns the tool's JSON-Schema parameters adapted to what
+// Gemini accepts, recording each kind of adaptation made in notes. On a parse
+// error the raw schema passes through unchanged.
+func geminiParameters(raw json.RawMessage, notes map[string]bool) any {
 	if len(raw) == 0 {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var schema map[string]any
-	if json.Unmarshal(raw, &schema) != nil {
+	if dec.Decode(&schema) != nil {
 		return raw
 	}
-	stripAdditionalProperties(schema)
-	return schema
+	return adaptSchema(schema, notes)
 }
 
-// stripAdditionalProperties recursively removes "additionalProperties" keys.
-func stripAdditionalProperties(v any) {
-	switch t := v.(type) {
-	case map[string]any:
-		delete(t, "additionalProperties")
-		for _, val := range t {
-			stripAdditionalProperties(val)
+// adaptSchema recursively adapts a JSON schema to the subset Gemini accepts.
+//
+// Tool schemas are JSON Schema, but Gemini takes only a limited subset of it
+// (its schema object follows OpenAPI 3.0's, which predates JSON Schema
+// alignment) and rejects anything outside that subset. Three constructs need
+// adapting:
+//
+//   - Keys it has no field for, namely additionalProperties and vendor
+//     extensions (x- prefixed, such as the x-mcp-header an MCP server may
+//     attach to its tool properties), are dropped.
+//   - A union type (a list of types) becomes the equivalent anyOf.
+//   - enum members must be strings, so an enum holding other values is dropped
+//     and its constraint lost.
+//
+// notes collects one description per kind of adaptation applied.
+func adaptSchema(schema any, notes map[string]bool) any {
+	obj, ok := schema.(map[string]any)
+	if !ok {
+		return schema
+	}
+	result := make(map[string]any, len(obj))
+	// Sorted, so a type rewritten as anyOf settles a clash with an explicit
+	// anyOf the same way every time.
+	for _, key := range slices.Sorted(maps.Keys(obj)) {
+		value := obj[key]
+		dict, isDict := value.(map[string]any)
+		list, isList := value.([]any)
+		switch {
+		case unsupportedSchemaKey(key):
+			notes[fmt.Sprintf("dropped unsupported key '%s'", key)] = true
+		case key == "properties" && isDict:
+			// Keys here name the tool's parameters rather than schema keywords,
+			// so adapt the values but keep every key.
+			props := make(map[string]any, len(dict))
+			for name, prop := range dict {
+				props[name] = adaptSchema(prop, notes)
+			}
+			result[key] = props
+		case key == "type" && isList:
+			notes["converted a union 'type' to 'anyOf'"] = true
+			result["anyOf"] = unionAsAnyOf(list)
+		case key == "enum" && isList && !allStrings(list):
+			notes["dropped a non-string 'enum', losing its constraint"] = true
+		case isDict:
+			result[key] = adaptSchema(dict, notes)
+		case isList:
+			result[key] = adaptEach(list, notes)
+		default:
+			result[key] = value
 		}
-	case []any:
-		for _, val := range t {
-			stripAdditionalProperties(val)
+	}
+	return result
+}
+
+// unsupportedSchemaKey reports whether Gemini has no field for a schema key:
+// additionalProperties, and the x- prefixed vendor extensions.
+func unsupportedSchemaKey(key string) bool {
+	return key == "additionalProperties" || strings.HasPrefix(key, "x-")
+}
+
+// unionAsAnyOf renders a union type as the equivalent anyOf.
+func unionAsAnyOf(members []any) []any {
+	anyOf := make([]any, 0, len(members))
+	for _, member := range members {
+		anyOf = append(anyOf, map[string]any{"type": member})
+	}
+	return anyOf
+}
+
+// adaptEach adapts every item of a list of schemas.
+func adaptEach(items []any, notes map[string]bool) []any {
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, adaptSchema(item, notes))
+	}
+	return out
+}
+
+// allStrings reports whether every member of an enum is a string.
+func allStrings(members []any) bool {
+	for _, m := range members {
+		if _, ok := m.(string); !ok {
+			return false
 		}
+	}
+	return true
+}
+
+// warnSchemaAdaptations reports the tool schemas that had to be adapted before
+// Gemini would accept them, given each adaptation and the tools it applied to.
+//
+// Each (adaptation, tool) pair is reported once, so a stable tool set warns on
+// the first inference rather than on all of them, while a tool added later
+// still gets reported.
+func (a *Adapter) warnSchemaAdaptations(adapted map[string][]string) {
+	a.warnedMu.Lock()
+	defer a.warnedMu.Unlock()
+	var lines []string
+	for _, note := range slices.Sorted(maps.Keys(adapted)) {
+		var fresh []string
+		for _, tool := range adapted[note] {
+			key := schemaAdaptation{note: note, tool: tool}
+			if a.warnedSchemaAdaptations[key] {
+				continue
+			}
+			if a.warnedSchemaAdaptations == nil {
+				a.warnedSchemaAdaptations = map[schemaAdaptation]bool{}
+			}
+			a.warnedSchemaAdaptations[key] = true
+			fresh = append(fresh, tool)
+		}
+		if len(fresh) == 0 {
+			continue
+		}
+		listed := strings.Join(fresh[:min(len(fresh), 3)], ", ")
+		if len(fresh) > 3 {
+			listed += fmt.Sprintf(" and %d more", len(fresh)-3)
+		}
+		lines = append(lines, note+": "+listed)
+	}
+	if len(lines) > 0 {
+		slog.Warn("adapted tool schemas Gemini does not accept as-is",
+			"adaptations", strings.Join(lines, "; "))
 	}
 }
 

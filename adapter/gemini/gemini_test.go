@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -269,6 +270,135 @@ func TestFunctionResponseDict(t *testing.T) {
 	m, ok := FunctionResponseDict("sunny").(map[string]any)
 	if !ok || m["value"] != "sunny" {
 		t.Errorf("non-object should wrap as {value}, got %v", FunctionResponseDict("sunny"))
+	}
+}
+
+// Gemini requires an object for a function response, so every result that is
+// not one is wrapped, decoded when it is JSON. A function returning nothing
+// yields null, which went out bare and was refused.
+func TestFunctionResponseDictWrapsEveryNonObject(t *testing.T) {
+	cases := map[string]string{
+		`null`:                 `{"value":null}`,
+		`[1,2]`:                `{"value":[1,2]}`,
+		`42`:                   `{"value":42}`,
+		`12345678901234567890`: `{"value":12345678901234567890}`,
+		`"COMPLETED"`:          `{"value":"COMPLETED"}`,
+		`COMPLETED`:            `{"value":"COMPLETED"}`,
+		`{"temp":20}`:          `{"temp":20}`,
+		`{"a":1} extra`:        `{"value":"{\"a\":1} extra"}`,
+	}
+	for in, want := range cases {
+		b, err := json.Marshal(FunctionResponseDict(in))
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", in, err)
+		}
+		if string(b) != want {
+			t.Errorf("%s -> %s, want %s", in, b, want)
+		}
+	}
+}
+
+// toolsJSON converts a tool set and decodes the result, for comparing with the
+// expected declarations as data rather than as text.
+func toolsJSON(t *testing.T, a *Adapter, tools ...frames.Tool) any {
+	t.Helper()
+	b, err := json.Marshal(a.ToProviderToolsFormat(frames.ToolsSchema{Standard: tools}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return got
+}
+
+// wantJSON decodes the expected declarations.
+func wantJSON(t *testing.T, s string) any {
+	t.Helper()
+	var want any
+	if err := json.Unmarshal([]byte(s), &want); err != nil {
+		t.Fatalf("expected JSON: %v", err)
+	}
+	return want
+}
+
+// Keys Gemini's validation rejects are dropped wherever they appear in a schema,
+// a parameter whose name only looks like one of them excepted.
+func TestToProviderToolsFormatStripsKeysGeminiRejects(t *testing.T) {
+	capturedWarnings(t)
+	got := toolsJSON(t, &Adapter{}, frames.Tool{
+		Name:        "get_file_contents",
+		Description: "Get the contents of a file",
+		Parameters: json.RawMessage(`{"type":"object","properties":{
+			"owner":{"type":"string","description":"Repository owner","x-mcp-header":"owner"},
+			"x-api-key":{"type":"string","description":"Caller's API key"},
+			"options":{"type":"object","additionalProperties":false,"properties":{"x-ref":{"type":"string"}}}
+		},"required":["owner"]}`),
+	})
+	want := wantJSON(t, `[{"functionDeclarations":[{
+		"name":"get_file_contents",
+		"description":"Get the contents of a file",
+		"parameters":{"type":"object","properties":{
+			"owner":{"type":"string","description":"Repository owner"},
+			"x-api-key":{"type":"string","description":"Caller's API key"},
+			"options":{"type":"object","properties":{"x-ref":{"type":"string"}}}
+		},"required":["owner"]}
+	}]}]`)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
+
+// Constructs Gemini cannot express are rewritten: a union type becomes anyOf,
+// and an enum of anything but strings is dropped with the type kept.
+func TestToProviderToolsFormatTranslatesConstructsGeminiRejects(t *testing.T) {
+	capturedWarnings(t)
+	got := toolsJSON(t, &Adapter{}, frames.Tool{
+		Name:        "issue_write",
+		Description: "Set or clear issue fields",
+		Parameters: json.RawMessage(`{"type":"object","properties":{
+			"value":{"type":["string","number","boolean"],"description":"Value to set"},
+			"delete":{"type":"boolean","enum":[true],"description":"Clear the field"},
+			"mode":{"type":"string","enum":["create","update"]}
+		},"required":["value"]}`),
+	})
+	want := wantJSON(t, `[{"functionDeclarations":[{
+		"name":"issue_write",
+		"description":"Set or clear issue fields",
+		"parameters":{"type":"object","properties":{
+			"value":{"anyOf":[{"type":"string"},{"type":"number"},{"type":"boolean"}],"description":"Value to set"},
+			"delete":{"type":"boolean","description":"Clear the field"},
+			"mode":{"type":"string","enum":["create","update"]}
+		},"required":["value"]}
+	}]}]`)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
+
+// The adaptations are reported, once per tool: the same tools on a later
+// inference do not warn again.
+func TestToProviderToolsFormatWarnsOncePerAdaptedTool(t *testing.T) {
+	logged := capturedWarnings(t)
+	a := &Adapter{}
+	tool := frames.Tool{
+		Name: "issue_write",
+		Parameters: json.RawMessage(
+			`{"type":"object","properties":{"value":{"type":["string","number"],"x-mcp-header":"value"}}}`),
+	}
+
+	toolsJSON(t, a, tool)
+	warned := logged()
+	for _, want := range []string{"issue_write", "anyOf", "x-mcp-header"} {
+		if !strings.Contains(warned, want) {
+			t.Errorf("the warning does not mention %s: %s", want, warned)
+		}
+	}
+
+	toolsJSON(t, a, tool)
+	if again := strings.TrimPrefix(logged(), warned); again != "" {
+		t.Errorf("the same tools warned again: %s", again)
 	}
 }
 
