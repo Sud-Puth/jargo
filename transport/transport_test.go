@@ -208,7 +208,7 @@ func TestBaseInputStopFramePausesAudio(t *testing.T) {
 func TestBaseInputRoutesFilterSettings(t *testing.T) {
 	params := transport.DefaultParams()
 	params.AudioInSampleRate = 48000
-	filter := &fakeFilter{controls: make(chan *frames.FilterUpdateSettingsFrame, 4)}
+	filter := &fakeFilter{controls: make(chan frames.FilterControlFrame, 4)}
 	params.AudioInFilter = filter
 
 	in := newFakeInput(params, 0)
@@ -219,12 +219,99 @@ func TestBaseInputRoutesFilterSettings(t *testing.T) {
 	task.QueueFrame(frames.NewFilterUpdateSettingsFrame(map[string]any{"level": 3}))
 
 	select {
-	case settings := <-filter.controls:
+	case fr := <-filter.controls:
+		settings, ok := fr.(*frames.FilterUpdateSettingsFrame)
+		if !ok {
+			t.Fatalf("filter got %s, want a FilterUpdateSettingsFrame", fr.Name())
+		}
 		if settings.Settings["level"] != 3 {
 			t.Errorf("settings = %v, want level 3", settings.Settings)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("FilterUpdateSettingsFrame never reached the filter")
+	}
+
+	task.StopWhenDone()
+	<-runDone
+}
+
+// TestBaseInputRoutesFilterEnable checks that switching the filter off at
+// runtime reaches the filter rather than being forwarded past it, and that the
+// frame stops there.
+func TestBaseInputRoutesFilterEnable(t *testing.T) {
+	params := transport.DefaultParams()
+	params.AudioInSampleRate = 48000
+	filter := &fakeFilter{controls: make(chan frames.FilterControlFrame, 4)}
+	params.AudioInFilter = filter
+
+	var forwarded atomic.Int32
+	in := newFakeInput(params, 0)
+	task := pipeline.NewWorker(pipeline.New(in), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+		if _, ok := f.(frames.FilterControlFrame); ok {
+			forwarded.Add(1)
+		}
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewFilterEnableFrame(false))
+
+	select {
+	case fr := <-filter.controls:
+		enable, ok := fr.(*frames.FilterEnableFrame)
+		if !ok {
+			t.Fatalf("filter got %s, want a FilterEnableFrame", fr.Name())
+		}
+		if enable.Enable {
+			t.Error("Enable = true, want false")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("FilterEnableFrame never reached the filter")
+	}
+
+	task.StopWhenDone()
+	<-runDone
+	if n := forwarded.Load(); n != 0 {
+		t.Errorf("%d filter control frames were forwarded past the filter", n)
+	}
+}
+
+// TestBaseInputForwardsFilterControlWithoutFilter checks a filter control frame
+// travels on when this transport has no input filter, so a filter further down
+// the pipeline can still be driven by it.
+func TestBaseInputForwardsFilterControlWithoutFilter(t *testing.T) {
+	params := transport.DefaultParams()
+	params.AudioInSampleRate = 48000
+
+	got := make(chan frames.Frame, 4)
+	in := newFakeInput(params, 0)
+	task := pipeline.NewWorker(pipeline.New(in), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+		if _, ok := f.(frames.FilterControlFrame); ok {
+			got <- f
+		}
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewFilterEnableFrame(true))
+	task.QueueFrame(frames.NewFilterUpdateSettingsFrame(map[string]any{"level": 1}))
+
+	for i, want := range []string{"FilterEnableFrame", "FilterUpdateSettingsFrame"} {
+		select {
+		case f := <-got:
+			_, isEnable := f.(*frames.FilterEnableFrame)
+			if isEnable != (i == 0) {
+				t.Errorf("forwarded %s, want %s", f.Name(), want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s was not forwarded", want)
+		}
 	}
 
 	task.StopWhenDone()
@@ -267,13 +354,13 @@ type fakeFilter struct {
 	rate     atomic.Int32
 	filtered atomic.Int32
 
-	// controls records the settings frames routed to the filter at runtime.
-	controls chan *frames.FilterUpdateSettingsFrame
+	// controls records the control frames routed to the filter at runtime.
+	controls chan frames.FilterControlFrame
 }
 
 func (f *fakeFilter) ProcessFrame(_ context.Context, fr frames.FilterControlFrame) error {
-	if settings, ok := fr.(*frames.FilterUpdateSettingsFrame); ok && f.controls != nil {
-		f.controls <- settings
+	if f.controls != nil {
+		f.controls <- fr
 	}
 	return nil
 }

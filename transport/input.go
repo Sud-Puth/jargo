@@ -194,9 +194,12 @@ func (bi *BaseInput) ProcessFrame(ctx context.Context, f frames.Frame, dir proce
 		return nil
 	case *frames.InputTransportStartAudioStreamingFrame:
 		return bi.self.StartAudioStreaming(ctx)
-	case *frames.FilterUpdateSettingsFrame:
+	case frames.FilterControlFrame:
+		// Every filter control (switching the filter on or off, or changing its
+		// settings) is the input filter's to apply. With no filter here it is
+		// meant for one further down, so it travels on.
 		if bi.filter == nil {
-			return nil
+			return bi.PushFrame(ctx, f, dir)
 		}
 		return bi.filter.ProcessFrame(ctx, fr)
 	default:
