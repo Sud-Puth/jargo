@@ -645,7 +645,7 @@ func (b *Base) RotateTurnContext(ctx context.Context) {
 		return
 	}
 
-	b.pushSequencerFrames(ctx, b.sequencer.Finalize(current))
+	b.pushSequencerFrames(ctx, b.sequencer.Finalize(current), current)
 	if b.AudioContextAvailable(current) {
 		if f, ok := b.syn.(AudioFlusher); ok {
 			f.FlushAudio(ctx, current)
@@ -942,13 +942,31 @@ func (b *Base) pushWord(ctx context.Context, c *audioContext, contextID string, 
 		c.holdWord(it)
 		return
 	}
-	b.pushSequencerFrames(ctx,
+	b.pushWordFrames(ctx,
 		b.sequencer.ProcessWord(it.word, int64(pts), contextID, it.includesInterFrame))
 }
 
-// pushSequencerFrames emits what the sequencer returned, recording when the last
-// word was spoken so a later context times its own words after it.
-func (b *Base) pushSequencerFrames(ctx context.Context, out []frames.Frame) {
+// pushSequencerFrames emits what the sequencer returned for text registered on a
+// context, in audio order.
+//
+// Streaming tokens, these frames (a promoted sentence and the words replayed
+// against it) describe a context whose audio and words the drain loop emits.
+// They go through that context's queue, so one goroutine emits everything in
+// order; pushed from here they would race it. With the context gone, or not
+// streaming, they are pushed directly.
+func (b *Base) pushSequencerFrames(ctx context.Context, out []frames.Frame, contextID string) {
+	for _, f := range out {
+		if b.isStreamingTokens() && b.AudioContextAvailable(contextID) {
+			b.AppendToAudioContext(contextID, f)
+			continue
+		}
+		_ = b.PushFrame(ctx, f, processor.Downstream)
+	}
+}
+
+// pushWordFrames emits the word frames the sequencer built, recording when the
+// last word was spoken so a later context times its own words after it.
+func (b *Base) pushWordFrames(ctx context.Context, out []frames.Frame) {
 	for _, f := range out {
 		if _, ok := f.(*frames.TTSTextFrame); ok {
 			if pts, has := f.Base().PTS(); has {
@@ -989,5 +1007,5 @@ func (b *Base) setLastWordPTS(pts time.Duration) {
 // text of any sentence the provider never finished reporting words for and
 // releasing the frames that were waiting behind it.
 func (b *Base) applyForceComplete(ctx context.Context, contextID string) {
-	b.pushSequencerFrames(ctx, b.sequencer.ForceComplete(contextID, int64(b.lastWordPTS())))
+	b.pushWordFrames(ctx, b.sequencer.ForceComplete(contextID, int64(b.lastWordPTS())))
 }

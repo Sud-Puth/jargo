@@ -786,6 +786,10 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	if err := b.flush(ctx); err != nil {
 		return err
 	}
+	// Streaming tokens, a sentence the response ended without punctuating is
+	// still pending in the sequencer, waiting on a boundary that is not coming.
+	// It is promoted now, or its words would never be spoken into the context.
+	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContext), b.turnContext)
 	// Pause before the flag is cleared: a turn that sent no text, a function
 	// call and nothing else, has no audio to wait for.
 	b.maybePauseFrameProcessing()
@@ -948,6 +952,10 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	if err := b.pushTTSFrames(ctx, spoken, appendToContext, pushAssistantAggregation); err != nil {
 		return err
 	}
+	// Streaming tokens, the utterance is held as a pending sentence with no
+	// following token to confirm its boundary, so it is promoted here or it is
+	// never spoken into the context.
+	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContext), b.turnContext)
 	b.onTurnContextCompleted(ctx)
 	// Text went to the provider, so pause for the audio it will produce.
 	b.maybePauseFrameProcessing()
@@ -1182,7 +1190,7 @@ func (b *Base) pushTTSFrames(
 	// follows.
 	if b.skipsSynthesis(agg.Type) {
 		b.pushSequencerFrames(ctx, b.sequencer.RegisterSkipped(
-			b.aggregatedFrame(agg, contextID), contextID, b.destinationName()))
+			b.aggregatedFrame(agg, contextID), contextID, b.destinationName()), contextID)
 		return nil
 	}
 
@@ -1264,7 +1272,8 @@ func (b *Base) pushTTSFrames(
 	b.Events().Call(ctx, EventTTSRequest, b, TTSRequest{ContextID: contextID, Text: prepared})
 	c.addText(prepared)
 	b.pushSequencerFrames(ctx, b.sequencer.RegisterSpoken(
-		aggregated, contextID, prepared, appendToContext, b.wordPath(), false, b.TextAggregationLanguage()))
+		aggregated, contextID, prepared, appendToContext, b.wordPath(), false, b.TextAggregationLanguage()),
+		contextID)
 	return b.runTTS(ctx, c, contextID, original, prepared, agg.Type, appendToContext)
 }
 
@@ -1331,7 +1340,11 @@ func (b *Base) runTTS(
 		text.WillBeSpoken = true
 		text.AppendToContext = appendToContext
 		b.AppendToAudioContext(contextID, text)
-		b.pushSequencerFrames(ctx, b.sequencer.CompleteSpokenSlot())
+		// The text frame is queued, so the slot is complete and whatever was held
+		// behind it can go on.
+		for _, f := range b.sequencer.CompleteSpokenSlot() {
+			_ = b.PushFrame(ctx, f, processor.Downstream)
+		}
 	}
 	return nil
 }
