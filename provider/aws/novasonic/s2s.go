@@ -81,7 +81,8 @@ func (s *Service) Generate(context.Context, *frames.LLMContext, llm.Emit) error 
 // ProcessFrame opens the session on StartFrame, forwards input audio to the
 // model, and tears the session down when the pipeline ends.
 func (s *Service) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.Direction) error {
-	if audio, ok := f.(*frames.InputAudioRawFrame); ok && dir == processor.Downstream {
+	if in, ok := f.(frames.InputAudioFrame); ok && dir == processor.Downstream {
+		audio := in.AudioData()
 		// The model consumes the audio, so it does not travel on. Only the
 		// processor bookkeeping runs: the LLM base would forward it.
 		if err := s.Base.Base.ProcessFrame(ctx, f, dir); err != nil {

@@ -35,7 +35,7 @@ type BaseInput struct {
 
 	mu          sync.Mutex
 	paused      bool
-	audioIn     chan *frames.InputAudioRawFrame
+	audioIn     chan frames.InputAudioFrame
 	audioCtx    context.Context
 	audioCancel context.CancelFunc
 	audioWG     sync.WaitGroup
@@ -75,7 +75,7 @@ func (bi *BaseInput) EnableAudioInStreamOnStart(enabled bool) {
 
 // PushAudioFrame queues a received audio frame to be pushed downstream. The
 // driver calls it for each chunk of audio it reads from the transport.
-func (bi *BaseInput) PushAudioFrame(ctx context.Context, f *frames.InputAudioRawFrame) {
+func (bi *BaseInput) PushAudioFrame(ctx context.Context, f frames.InputAudioFrame) {
 	if !bi.params.AudioInEnabled {
 		return
 	}
@@ -165,7 +165,7 @@ func (bi *BaseInput) ProcessFrame(ctx context.Context, f frames.Frame, dir proce
 	case *frames.CancelFrame:
 		bi.stopStreaming(ctx)
 		return bi.PushFrame(ctx, f, dir)
-	case *frames.InputAudioRawFrame:
+	case frames.InputAudioFrame:
 		// Audio pushed in from upstream (by the RTVI processor, say) goes down
 		// the same filtering path as audio read from the transport itself,
 		// rather than being forwarded on as a plain frame.
@@ -230,7 +230,7 @@ func (bi *BaseInput) startStreaming(ctx context.Context) error {
 	bi.mu.Lock()
 	bi.paused = false
 	bi.audioCtx, bi.audioCancel = context.WithCancel(ctx)
-	bi.audioIn = make(chan *frames.InputAudioRawFrame, audioFrameChanCap)
+	bi.audioIn = make(chan frames.InputAudioFrame, audioFrameChanCap)
 	audioCtx := bi.audioCtx
 	bi.mu.Unlock()
 
@@ -262,7 +262,7 @@ func (bi *BaseInput) pause(ctx context.Context) {
 
 	bi.mu.Lock()
 	bi.audioCtx, bi.audioCancel = context.WithCancel(ctx)
-	bi.audioIn = make(chan *frames.InputAudioRawFrame, audioFrameChanCap)
+	bi.audioIn = make(chan frames.InputAudioFrame, audioFrameChanCap)
 	audioCtx := bi.audioCtx
 	bi.mu.Unlock()
 
@@ -318,16 +318,17 @@ func (bi *BaseInput) audioLoop(ctx context.Context) {
 // The audio is replaced on the frame rather than copied onto a new one, so what
 // travels on is the frame the transport produced: the source it names and the
 // moment it carries belong to that frame and are not the filter's to drop.
-func (bi *BaseInput) applyFilter(ctx context.Context, f *frames.InputAudioRawFrame) bool {
+func (bi *BaseInput) applyFilter(ctx context.Context, f frames.InputAudioFrame) bool {
+	audio := f.AudioData()
 	if !bi.filterActive {
-		return len(f.Audio) > 0
+		return len(audio.Audio) > 0
 	}
-	filtered, err := bi.filter.Filter(ctx, f.Audio)
+	filtered, err := bi.filter.Filter(ctx, audio.Audio)
 	if err != nil {
 		bi.PushError(ctx, "audio input filter failed", err, false)
-		return len(f.Audio) > 0
+		return len(audio.Audio) > 0
 	}
-	f.Audio = filtered
+	audio.Audio = filtered
 	return len(filtered) > 0
 }
 
@@ -337,9 +338,17 @@ func (bi *BaseInput) applyFilter(ctx context.Context, f *frames.InputAudioRawFra
 // It keeps the frame's identity, so what travels on is still the frame that was
 // pushed in rather than a new one appearing mid-pipeline, and it shares the
 // audio rather than duplicating it, which a filter only ever reads.
-func unshared(f *frames.InputAudioRawFrame) *frames.InputAudioRawFrame {
-	cp := *f
-	return &cp
+func unshared(f frames.InputAudioFrame) frames.InputAudioFrame {
+	switch fr := f.(type) {
+	case *frames.UserAudioRawFrame:
+		cp := *fr
+		return &cp
+	case *frames.InputAudioRawFrame:
+		cp := *fr
+		return &cp
+	default:
+		return f
+	}
 }
 
 func pick(a, b int) int {

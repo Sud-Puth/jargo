@@ -520,7 +520,7 @@ func (in *inputTransport) readLoop(ctx context.Context) {
 		if f == nil {
 			continue
 		}
-		if af, ok := f.(*frames.InputAudioRawFrame); ok {
+		if af, ok := f.(frames.InputAudioFrame); ok {
 			in.PushAudioFrame(ctx, af)
 			continue
 		}

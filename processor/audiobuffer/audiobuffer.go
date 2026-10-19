@@ -605,8 +605,9 @@ const (
 // PCM, its sample rate and channel count.
 func classify(f frames.Frame) (audio []byte, rate, channels int, kind audioKind) {
 	switch fr := f.(type) {
-	case *frames.InputAudioRawFrame:
-		return fr.Audio, fr.SampleRate, fr.NumChannels, kindUser
+	case frames.InputAudioFrame:
+		a := fr.AudioData()
+		return a.Audio, a.SampleRate, a.NumChannels, kindUser
 	case *frames.TTSAudioRawFrame:
 		return fr.Audio, fr.SampleRate, fr.NumChannels, kindBot
 	case *frames.OutputAudioRawFrame:

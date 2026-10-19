@@ -189,6 +189,23 @@ func TestControllerReportsSpeechStarting(t *testing.T) {
 	}
 }
 
+// TestControllerAnalyzesUserAudio checks that audio attributed to a user is
+// analyzed like any other input audio.
+func TestControllerAnalyzesUserAudio(t *testing.T) {
+	a := newMockAnalyzer()
+	r := newRecorder()
+	c := newTestController(t, a, r, controller.Config{})
+
+	a.setNextState(vad.StateSpeaking)
+	user := frames.NewUserAudioRawFrame("user-1", make([]byte, 1024), 16000, 1)
+	if err := c.ProcessFrame(context.Background(), user); err != nil {
+		t.Fatalf("process user audio: %v", err)
+	}
+	if started, _, _ := r.counts(); started != 1 {
+		t.Errorf("user speech reported starting %d times, want 1", started)
+	}
+}
+
 // TestControllerReportsSpeechStopping covers the transition out of speech: the
 // turn closes on the first chunk heard as quiet, and not before.
 func TestControllerReportsSpeechStopping(t *testing.T) {

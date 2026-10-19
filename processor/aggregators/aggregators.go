@@ -2203,7 +2203,7 @@ func isUserInput(f frames.Frame) bool {
 		*frames.VADUserStartedSpeakingFrame, *frames.VADUserStoppedSpeakingFrame,
 		*frames.ProposedUserStartedSpeakingFrame, *frames.ProposedUserStoppedSpeakingFrame,
 		*frames.UserStartedSpeakingFrame, *frames.UserStoppedSpeakingFrame,
-		*frames.InputAudioRawFrame,
+		frames.InputAudioFrame,
 		*frames.InterimTranscriptionFrame, *frames.TranscriptionFrame,
 		*frames.EagerTranscriptionFrame:
 		return true

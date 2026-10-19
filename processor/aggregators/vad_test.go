@@ -193,3 +193,57 @@ func TestNoAnalyzerMeansNoDetection(t *testing.T) {
 	task.StopWhenDone()
 	<-runDone
 }
+
+// TestUserAudioIsDetectedAndMuted checks that audio attributed to a user is
+// input audio like any other: detection runs over it, and a mute drops it
+// before the detector sees it.
+func TestUserAudioIsDetectedAndMuted(t *testing.T) {
+	run := func(t *testing.T, muted bool) (detected bool, analyzed int) {
+		t.Helper()
+		analyzer := newScriptedVAD(vad.StateSpeaking)
+		opts := []aggregators.Option{aggregators.WithVAD(aggregators.VADConfig{Analyzer: analyzer})}
+		if muted {
+			opts = append(opts, aggregators.WithMuteStrategies(turns.NewAlwaysUserMute()))
+		}
+		pair := aggregators.New(frames.NewLLMContext("system"), opts...)
+
+		seen := make(chan frames.Frame, 64)
+		task := pipeline.NewWorker(pipeline.New(pair.User()), pipeline.WorkerConfig{
+			ReachedDownstreamFilter: pipeline.AnyFrame,
+		})
+		events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+			select {
+			case seen <- f:
+			default:
+			}
+		})
+		runDone := make(chan error, 1)
+		go func() { runDone <- task.Run(context.Background()) }()
+		defer func() { task.StopWhenDone(); <-runDone }()
+
+		if muted {
+			task.QueueFrame(frames.NewBotStartedSpeakingFrame())
+		}
+		for range 3 {
+			task.QueueFrame(frames.NewUserAudioRawFrame("user-1", make([]byte, 640), 16000, 1))
+		}
+		detected = sawFrame(seen, func(f frames.Frame) bool {
+			_, ok := f.(*frames.VADUserStartedSpeakingFrame)
+			return ok
+		})
+		analyzer.mu.Lock()
+		defer analyzer.mu.Unlock()
+		return detected, analyzer.i
+	}
+
+	t.Run("heard", func(t *testing.T) {
+		if detected, _ := run(t, false); !detected {
+			t.Error("user audio was never analyzed, so its speech was not detected")
+		}
+	})
+	t.Run("muted", func(t *testing.T) {
+		if _, analyzed := run(t, true); analyzed != 0 {
+			t.Errorf("the detector analyzed %d muted user audio chunks, want 0", analyzed)
+		}
+	})
+}

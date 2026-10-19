@@ -399,8 +399,8 @@ func (o *Observer) audioLevelMessageFor(f frames.Frame) (Message, bool, bool) {
 	o.paramsMu.Unlock()
 
 	switch fr := f.(type) {
-	case *frames.InputAudioRawFrame:
-		audio, enabled, build = fr.AudioRawData, params.UserAudioLevelEnabled, UserAudioLevel
+	case frames.InputAudioFrame:
+		audio, enabled, build = *fr.AudioData(), params.UserAudioLevelEnabled, UserAudioLevel
 		tracker, lastSent = &o.userVolume, &o.lastUserSent
 	case *frames.TTSAudioRawFrame:
 		audio, enabled, build = fr.AudioRawData, params.BotAudioLevelEnabled, BotAudioLevel

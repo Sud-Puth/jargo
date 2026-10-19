@@ -125,6 +125,45 @@ func TestBaseInputRoutesUpstreamAudioThroughFilter(t *testing.T) {
 	<-runDone
 }
 
+// TestBaseInputRoutesUpstreamUserAudioThroughFilter checks that audio attributed
+// to a user takes the same path as plain input audio, and comes out still
+// attributed to that user.
+func TestBaseInputRoutesUpstreamUserAudioThroughFilter(t *testing.T) {
+	params := transport.DefaultParams()
+	params.AudioInSampleRate = 48000
+	params.AudioInFilter = &fakeFilter{}
+
+	got := make(chan *frames.UserAudioRawFrame, 4)
+	in := newFakeInput(params, 0)
+	task := pipeline.NewWorker(pipeline.New(in), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, fr frames.Frame) {
+		if af, ok := fr.(*frames.UserAudioRawFrame); ok {
+			got <- af
+		}
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewUserAudioRawFrame("user-1", []byte{1, 2, 3, 4}, 48000, 1))
+
+	select {
+	case af := <-got:
+		if !bytes.Equal(af.Audio, []byte{2, 3, 4, 5}) {
+			t.Errorf("audio = %v, want %v (user audio bypassed the filter)", af.Audio, []byte{2, 3, 4, 5})
+		}
+		if af.UserID != "user-1" {
+			t.Errorf("user id = %q, want %q", af.UserID, "user-1")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("user audio never reached downstream")
+	}
+
+	task.StopWhenDone()
+	<-runDone
+}
+
 // TestBaseInputStartAudioStreamingFrame checks that the frame reaches the
 // transport's streaming hook, so starting the stream stays frame-based rather
 // than a direct call across processors.

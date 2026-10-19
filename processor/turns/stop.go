@@ -114,8 +114,8 @@ func (s *TurnAnalyzerStop) Process(f frames.Frame) ProcessFrameResult {
 		s.analyzer.UpdateVADStartSecs(fr.StartSecs)
 		s.vadSpeaking = true
 		s.discardPendingEndOfTurn()
-	case *frames.InputAudioRawFrame:
-		if s.analyzer.AppendAudio(fr.Audio, s.vadSpeaking) == turn.Complete {
+	case frames.InputAudioFrame:
+		if s.analyzer.AppendAudio(fr.AudioData().Audio, s.vadSpeaking) == turn.Complete {
 			// A streaming analyzer decides inside AppendAudio, and a batch one
 			// reports Complete here only on the silence safety net. Either way the
 			// metrics are consumed now, while they are fresh.

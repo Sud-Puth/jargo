@@ -43,7 +43,7 @@ func WithIgnoredFrames(ignored FrameMatcher) LoggerOption {
 func defaultIgnoredFrames(f frames.Frame) bool {
 	switch f.(type) {
 	case *frames.BotSpeakingFrame, *frames.UserSpeakingFrame,
-		*frames.InputAudioRawFrame, *frames.OutputAudioRawFrame:
+		frames.InputAudioFrame, frames.OutputAudioFrame:
 		return true
 	default:
 		return false

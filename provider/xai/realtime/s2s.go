@@ -123,7 +123,8 @@ func (s *Service) Generate(context.Context, *frames.LLMContext, llm.Emit) error 
 // a second time. The exception is the conversation, which the base holds back
 // from a service that generates continuously.
 func (s *Service) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.Direction) error {
-	if audio, ok := f.(*frames.InputAudioRawFrame); ok && dir == processor.Downstream {
+	if in, ok := f.(frames.InputAudioFrame); ok && dir == processor.Downstream {
+		audio := in.AudioData()
 		// The model consumes the audio, so it does not travel on. Only the
 		// processor bookkeeping runs: the LLM base would forward it.
 		if err := s.Base.Base.ProcessFrame(ctx, f, dir); err != nil {

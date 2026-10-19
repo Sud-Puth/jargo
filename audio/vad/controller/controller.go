@@ -141,8 +141,8 @@ func (c *Controller) Params() vad.Params { return c.analyzer.Params() }
 // starts and stops it around the session with Start and Stop.
 func (c *Controller) ProcessFrame(ctx context.Context, f frames.Frame) error {
 	switch fr := f.(type) {
-	case *frames.InputAudioRawFrame:
-		c.handleAudio(ctx, fr)
+	case frames.InputAudioFrame:
+		c.handleAudio(ctx, fr.AudioData())
 	case *frames.VADParamsUpdateFrame:
 		c.analyzer.SetParams(fr.Params)
 		c.ReportParams(ctx)
@@ -224,7 +224,7 @@ func (c *Controller) Setup(s processor.Setup) error {
 }
 
 // handleAudio runs detection over one chunk and reports what it heard.
-func (c *Controller) handleAudio(ctx context.Context, f *frames.InputAudioRawFrame) {
+func (c *Controller) handleAudio(ctx context.Context, f *frames.AudioRawData) {
 	state := c.analyzer.AnalyzeAudio(c.toAnalyzerRate(f))
 
 	now := time.Now()
@@ -359,7 +359,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 // toAnalyzerRate returns the frame's audio resampled to the analyzer rate, mono.
-func (c *Controller) toAnalyzerRate(f *frames.InputAudioRawFrame) []byte {
+func (c *Controller) toAnalyzerRate(f *frames.AudioRawData) []byte {
 	if f.SampleRate == c.analyzerRate {
 		return f.Audio
 	}
