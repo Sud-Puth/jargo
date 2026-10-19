@@ -240,6 +240,11 @@ func (o *Observer) functionCallMessagesFor(f frames.Frame) ([]Message, bool) {
 			return LLMFunctionCall(fr.ToolName, fr.ToolCallID, fr.Args, level)
 		})
 	case *frames.FunctionCallResultFrame:
+		// An intermediate result leaves the call running, so only the final one
+		// stops it.
+		if !fr.Properties.Final() {
+			return nil, true
+		}
 		return o.callMessage(fr.ToolName, func(level FunctionCallReportLevel) Message {
 			return LLMFunctionCallStopped(fr.ToolName, fr.ToolCallID, fr.Result, false, level)
 		})

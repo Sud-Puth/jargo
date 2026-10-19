@@ -335,3 +335,40 @@ func TestObserverArgumentsLevelReportsArgumentsAndNoResult(t *testing.T) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }
+
+// TestObserverIntermediateResultLeavesTheCallRunning checks only a final result
+// stops a call. A handler reporting progress on a long-running call sends
+// intermediate results first, and a client told the call had stopped at the
+// first of them would stop showing it as running.
+//
+//nolint:misspell // the protocol spells "cancelled" this way
+func TestObserverIntermediateResultLeavesTheCallRunning(t *testing.T) {
+	notFinal := false
+	intermediate := frames.NewFunctionCallResultFrame("call_1", "get_weather", json.RawMessage(`{}`), "62")
+	intermediate.Properties = &frames.FunctionCallResultProperties{IsFinal: &notFinal}
+	final := frames.NewFunctionCallResultFrame("call_1", "get_weather", json.RawMessage(`{}`), "64")
+	cancel := frames.NewFunctionCallCancelFrame("call_2", "get_weather")
+
+	msgs := observerHarness(t, levels(rtvi.ReportFull), intermediate, final, cancel)
+
+	got := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		data, err := json.Marshal(m.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, m.Type+" "+string(data))
+	}
+	want := []string{
+		rtvi.TypeLLMFunctionCallStop +
+			` {"tool_call_id":"call_1","cancelled":false,"function_name":"get_weather","result":"64"}`,
+		rtvi.TypeLLMFunctionCallStop + ` {"tool_call_id":"call_2","cancelled":true,"function_name":"get_weather"}`,
+	}
+	// System frames can overtake the others, so the order of the messages is
+	// not fixed.
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
