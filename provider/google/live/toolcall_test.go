@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,12 +29,23 @@ type fakeLive struct {
 	*httptest.Server
 	mu       sync.Mutex
 	received []map[string]any
+	conns    []*fakeConn
+}
+
+// fakeConn is one connection to the fake endpoint and what reaches its client.
+//
+// A connection's handler can run after the client has already replaced it: a
+// session reopened to declare its tools may be dialed, set up and closed before
+// the server gets to it. So where a message goes is decided by what each
+// connection declared, not by the order the handlers ran in.
+type fakeConn struct {
 	toClient chan []byte
+	tools    bool
 }
 
 func newFakeLive(t *testing.T) *fakeLive {
 	t.Helper()
-	f := &fakeLive{toClient: make(chan []byte, 16)}
+	f := &fakeLive{}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
@@ -41,6 +53,11 @@ func newFakeLive(t *testing.T) *fakeLive {
 		}
 		defer func() { _ = c.Close(websocket.StatusNormalClosure, "") }()
 		ctx := r.Context()
+		fc := &fakeConn{toClient: make(chan []byte, 16)}
+		f.mu.Lock()
+		f.conns = append(f.conns, fc)
+		f.mu.Unlock()
+		defer f.drop(fc)
 
 		// The session is usable once the setup is acknowledged.
 		ready, _ := json.Marshal(map[string]any{"setupComplete": map[string]any{}})
@@ -51,7 +68,7 @@ func newFakeLive(t *testing.T) *fakeLive {
 				select {
 				case <-ctx.Done():
 					return
-				case payload := <-f.toClient:
+				case payload := <-fc.toClient:
 					if c.Write(ctx, websocket.MessageText, payload) != nil {
 						return
 					}
@@ -70,6 +87,9 @@ func newFakeLive(t *testing.T) *fakeLive {
 			}
 			f.mu.Lock()
 			f.received = append(f.received, msg)
+			if setupDeclaresTools(msg) {
+				fc.tools = true
+			}
 			f.mu.Unlock()
 		}
 	}))
@@ -77,10 +97,47 @@ func newFakeLive(t *testing.T) *fakeLive {
 	return f
 }
 
-// speak sends one server message to the client.
+// drop forgets a connection whose handler has returned.
+func (f *fakeLive) drop(fc *fakeConn) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.conns = slices.DeleteFunc(f.conns, func(c *fakeConn) bool { return c == fc })
+}
+
+// speak sends one server message to the client, on the open connection that
+// declared tools if there is one, and otherwise on the newest open one.
 func (f *fakeLive) speak(t *testing.T, raw string) {
 	t.Helper()
-	f.toClient <- []byte(raw)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		f.mu.Lock()
+		var to *fakeConn
+		for _, c := range f.conns {
+			if to == nil || c.tools || !to.tools {
+				to = c
+			}
+		}
+		f.mu.Unlock()
+		if to != nil {
+			to.toClient <- []byte(raw)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no connection to speak on")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// setupDeclaresTools reports whether msg is a setup carrying function
+// declarations.
+func setupDeclaresTools(msg map[string]any) bool {
+	setup, ok := msg["setup"].(map[string]any)
+	if !ok {
+		return false
+	}
+	tools, ok := setup["tools"].([]any)
+	return ok && len(tools) > 0
 }
 
 // received returns a snapshot of what the client has sent.
