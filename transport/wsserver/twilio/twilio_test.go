@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -578,3 +579,80 @@ func TestSerializeApplicationMessage(t *testing.T) {
 // serialized unwraps a serializer result to the bytes it produced. These tests
 // are about the wire format, not about how the message carrying it is framed.
 func serialized(m wsserver.Message, err error) ([]byte, error) { return m.Data, err }
+
+// hungServer stands in for a REST API that accepts the hang-up and never
+// answers. released is closed once the client gives up on the request.
+func hungServer(t *testing.T) (srv *httptest.Server, arrived, released chan struct{}) {
+	t.Helper()
+	arrived, released = make(chan struct{}), make(chan struct{})
+	stop := make(chan struct{})
+	srv = httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// The body is read first: only then does the server watch the
+		// connection, and so see the client hang up.
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(arrived)
+		select {
+		case <-r.Context().Done():
+			close(released)
+		case <-stop:
+		}
+	}))
+	// Cleanups run last first, so the handler is let go before the server
+	// waits for it to return.
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(stop) })
+	return srv, arrived, released
+}
+
+// TestHangUpIsBoundedAgainstAHungAPI checks a hang-up the API never answers is
+// given up on once its timeout passes. Left unbounded, the request would hold
+// the frame ending the run, and a connection, for as long as the API stays
+// silent.
+func TestHangUpIsBoundedAgainstAHungAPI(t *testing.T) {
+	saved := hangUpTimeout
+	hangUpTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { hangUpTimeout = saved })
+
+	srv, arrived, released := hungServer(t)
+	s := started(t, Config{AccountSID: "AC123", AuthToken: "token", HTTPClient: redirectToServer(srv)})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := s.Serialize(frames.NewEndFrame()); err != nil {
+			t.Errorf("serialize end: %v", err)
+		}
+	}()
+
+	for _, step := range []struct {
+		name string
+		ch   chan struct{}
+	}{
+		{"the hang-up request to arrive", arrived},
+		{"the hang-up request to be given up on", released},
+		{"Serialize to return", done},
+	} {
+		select {
+		case <-step.ch:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for %s", step.name)
+		}
+	}
+}
+
+// TestHangUpFinishesBeforeTheEndingFrameIsSerialized checks the hang-up is made
+// inline: by the time the frame ending the run has been serialized, the call
+// has been ended, rather than a request being left in flight behind it.
+func TestHangUpFinishesBeforeTheEndingFrameIsSerialized(t *testing.T) {
+	srv, got := hangupServer(t)
+	s := started(t, Config{AccountSID: "AC123", AuthToken: "token", HTTPClient: redirectToServer(srv)})
+
+	if _, err := s.Serialize(frames.NewEndFrame()); err != nil {
+		t.Fatalf("serialize end: %v", err)
+	}
+	select {
+	case <-got:
+	default:
+		t.Fatal("Serialize returned before the hang-up request was made")
+	}
+}

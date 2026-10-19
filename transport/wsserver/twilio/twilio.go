@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -259,6 +260,15 @@ func (s *Serializer) clear() (wsserver.Message, error) {
 	return wsserver.TextMessage(json.Marshal(clearOut{Event: "clear", StreamSID: sid}))
 }
 
+// hangUpTimeout bounds the hang-up request. The tests shorten it.
+var hangUpTimeout = wsserver.HangUpTimeout //nolint:gochecknoglobals // shortened by the tests
+
+// errCallNotFound is Twilio's error code for a call resource that does not
+// exist, which is what a call that has already ended answers with.
+const errCallNotFound = 20404
+
+// hangup ends the call once, the first time a frame ending the run is
+// serialized.
 func (s *Serializer) hangup() {
 	if !s.cfg.autoHangUp() {
 		return
@@ -273,25 +283,50 @@ func (s *Serializer) hangup() {
 	if !ready {
 		return
 	}
-	go s.doHangup(callSID)
+	s.hangUpCall(callSID)
 }
 
-func (s *Serializer) doHangup(callSID string) {
+// hangUpCall ends the call over Twilio's REST API by setting its status to
+// completed. It runs inline, so the frame ending the run goes no further until
+// the call is over, and within hangUpTimeout, so an API that never answers
+// cannot hold the run open for good. A failure is logged rather than returned:
+// the run is ending either way.
+func (s *Serializer) hangUpCall(callSID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+	defer cancel()
+
 	endpoint := s.cfg.callResourceURL(callSID)
 	body := strings.NewReader(url.Values{"Status": {"completed"}}.Encode())
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
-		slog.Warn("twilio: build hang-up request", "err", err)
+		slog.Error("twilio: failed to hang up call", "err", err)
 		return
 	}
 	req.SetBasicAuth(s.cfg.AccountSID, s.cfg.AuthToken)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		slog.Warn("twilio: hang-up call", "err", err)
+		slog.Error("twilio: failed to hang up call", "err", err)
 		return
 	}
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		slog.Info("twilio: terminated call", "call_sid", callSID)
+		return
+	}
+	text, _ := io.ReadAll(io.LimitReader(resp.Body, wsserver.HangUpErrorBodyLimit))
+	if resp.StatusCode == http.StatusNotFound {
+		var e struct {
+			Code int `json:"code"`
+		}
+		if json.Unmarshal(text, &e) == nil && e.Code == errCallNotFound {
+			slog.Debug("twilio: call was already terminated", "call_sid", callSID)
+			return
+		}
+	}
+	slog.Error("twilio: failed to terminate call",
+		"call_sid", callSID, "status", resp.StatusCode, "response", string(text))
 }
 
 // The JSON field names below are Twilio's wire protocol (camelCase), so the

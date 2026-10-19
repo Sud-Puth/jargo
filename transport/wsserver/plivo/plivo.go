@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -206,6 +207,11 @@ func (s *Serializer) clear() (wsserver.Message, error) {
 	return wsserver.TextMessage(json.Marshal(clearAudio{Event: "clearAudio", StreamID: id}))
 }
 
+// hangUpTimeout bounds the hang-up request. The tests shorten it.
+var hangUpTimeout = wsserver.HangUpTimeout //nolint:gochecknoglobals // shortened by the tests
+
+// hangup ends the call once, the first time a frame ending the run is
+// serialized.
 func (s *Serializer) hangup() {
 	if !s.cfg.autoHangUp() {
 		return
@@ -220,23 +226,41 @@ func (s *Serializer) hangup() {
 	if !ready {
 		return
 	}
-	go s.doHangup(callID)
+	s.hangUpCall(callID)
 }
 
-func (s *Serializer) doHangup(callID string) {
+// hangUpCall ends the call over Plivo's REST API by deleting it. It runs inline,
+// so the frame ending the run goes no further until the call is over, and within
+// hangUpTimeout, so an API that never answers cannot hold the run open for good.
+// A failure is logged rather than returned: the run is ending either way.
+func (s *Serializer) hangUpCall(callID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+	defer cancel()
+
 	endpoint := fmt.Sprintf(hangupURL, s.cfg.AuthID, callID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
 	if err != nil {
-		slog.Warn("plivo: build hang-up request", "err", err)
+		slog.Error("plivo: failed to hang up call", "err", err)
 		return
 	}
 	req.SetBasicAuth(s.cfg.AuthID, s.cfg.AuthToken)
 	resp, err := s.http.Do(req)
 	if err != nil {
-		slog.Warn("plivo: hang-up call", "err", err)
+		slog.Error("plivo: failed to hang up call", "err", err)
 		return
 	}
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		slog.Debug("plivo: terminated call", "call_id", callID)
+	case http.StatusNotFound:
+		slog.Debug("plivo: call already terminated", "call_id", callID)
+	default:
+		text, _ := io.ReadAll(io.LimitReader(resp.Body, wsserver.HangUpErrorBodyLimit))
+		slog.Error("plivo: failed to terminate call",
+			"call_id", callID, "status", resp.StatusCode, "response", string(text))
+	}
 }
 
 // The JSON field names below are Plivo's wire protocol (camelCase), so the

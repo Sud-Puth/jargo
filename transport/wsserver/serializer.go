@@ -1,9 +1,22 @@
 package wsserver
 
 import (
+	"time"
+
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/processor/rtvi"
 )
+
+// HangUpTimeout bounds the REST request a telephony serializer sends to end the
+// call when the pipeline finishes. The request is made while the frame that ends
+// the run is being serialized, so the run does not finish until the call has
+// been ended; the bound keeps a provider API that never answers from holding it
+// open for good.
+const HangUpTimeout = 5 * time.Minute
+
+// HangUpErrorBodyLimit caps how much of a failed hang-up response a serializer
+// reads to log alongside the status.
+const HangUpErrorBodyLimit = 64 << 10
 
 // Message is one wire message a Serializer produced, and how the WebSocket
 // frames it.

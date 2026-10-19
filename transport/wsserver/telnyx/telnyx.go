@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -209,6 +210,15 @@ func (s *Serializer) media(a *frames.AudioRawData) (wsserver.Message, error) {
 	return wsserver.TextMessage(json.Marshal(out))
 }
 
+// hangUpTimeout bounds the hang-up request. The tests shorten it.
+var hangUpTimeout = wsserver.HangUpTimeout //nolint:gochecknoglobals // shortened by the tests
+
+// errCallAlreadyEnded is Telnyx's error code for a hang-up of a call that has
+// already ended.
+const errCallAlreadyEnded = "90018"
+
+// hangup ends the call once, the first time a frame ending the run is
+// serialized.
 func (s *Serializer) hangup() {
 	if !s.cfg.autoHangUp() {
 		return
@@ -223,23 +233,62 @@ func (s *Serializer) hangup() {
 	if !ready {
 		return
 	}
-	go s.doHangup(callCtrl)
+	s.hangUpCall(callCtrl)
 }
 
-func (s *Serializer) doHangup(callCtrl string) {
+// hangUpCall ends the call over Telnyx's Call Control API. It runs inline, so
+// the frame ending the run goes no further until the call is over, and within
+// hangUpTimeout, so an API that never answers cannot hold the run open for good.
+// A failure is logged rather than returned: the run is ending either way.
+func (s *Serializer) hangUpCall(callCtrl string) {
+	ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+	defer cancel()
+
 	endpoint := fmt.Sprintf(hangupURL, callCtrl)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
-		slog.Warn("telnyx: build hang-up request", "err", err)
+		slog.Error("telnyx: failed to hang up call", "err", err)
 		return
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
 	resp, err := s.http.Do(req)
 	if err != nil {
-		slog.Warn("telnyx: hang-up call", "err", err)
+		slog.Error("telnyx: failed to hang up call", "err", err)
 		return
 	}
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusOK {
+		slog.Info("telnyx: terminated call", "call_control_id", callCtrl)
+		return
+	}
+	text, _ := io.ReadAll(io.LimitReader(resp.Body, wsserver.HangUpErrorBodyLimit))
+	if resp.StatusCode == http.StatusUnprocessableEntity && alreadyEnded(text) {
+		slog.Debug("telnyx: call was already terminated", "call_control_id", callCtrl)
+		return
+	}
+	slog.Error("telnyx: failed to terminate call",
+		"call_control_id", callCtrl, "status", resp.StatusCode, "response", string(text))
+}
+
+// alreadyEnded reports whether a hang-up error response says the call had
+// already ended.
+func alreadyEnded(body []byte) bool {
+	var e struct {
+		Errors []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return false
+	}
+	for _, x := range e.Errors {
+		if x.Code == errCallAlreadyEnded {
+			return true
+		}
+	}
+	return false
 }
 
 // encodingOf maps a Telnyx media_format encoding name to the companding it
