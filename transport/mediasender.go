@@ -35,6 +35,13 @@ type mediaSender struct {
 	resampler  *resample.Resampler
 	resampleIn int
 
+	// writeMu serializes the calls into the transport's WriteAudio for this
+	// destination. The audio loop writes from its own goroutine, and an urgent
+	// keypress is sounded from the process goroutine ahead of the queued audio,
+	// so without it the two would drive the transport's encoder (a serializer's
+	// resampler, say) at the same time.
+	writeMu sync.Mutex
+
 	bufMu sync.Mutex
 	// audioRuns is the incoming audio waiting to be cut into chunks, as runs of
 	// audio that came from frames with the same interruptible flag, so a chunk
@@ -718,7 +725,7 @@ func (s *mediaSender) writeAudio(ctx context.Context, af frames.OutputAudioFrame
 	writeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	sent, err := s.out.self.WriteAudio(writeCtx, af)
+	sent, err := s.writeTransportAudio(writeCtx, af)
 	if errors.Is(writeCtx.Err(), context.DeadlineExceeded) && !canceled(ctx) {
 		s.out.PushError(ctx, fmt.Sprintf(
 			"timed out after %s writing audio to the transport, the peer has stopped reading",
@@ -730,6 +737,14 @@ func (s *mediaSender) writeAudio(ctx context.Context, af frames.OutputAudioFrame
 			"processor", s.out.Name(), "destination", s.destination, "err", err)
 	}
 	return sent && err == nil
+}
+
+// writeTransportAudio hands one chunk to the transport, never while another
+// write to this destination is in flight.
+func (s *mediaSender) writeTransportAudio(ctx context.Context, af frames.OutputAudioFrame) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.out.self.WriteAudio(ctx, af)
 }
 
 // signalDrained releases a drainAudio waiter once the loop reaches its marker.

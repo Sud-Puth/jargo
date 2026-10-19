@@ -2,6 +2,7 @@ package transport_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,6 +173,70 @@ func TestUrgentDTMFGoesOutAtOnce(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the urgent keypress never reached the transport")
+	}
+}
+
+// pacedDTMFOutput takes a chunk as long as it plays, like a network transport
+// emulating a device, and counts writes that land while another is in flight.
+type pacedDTMFOutput struct {
+	*transport.BaseOutput
+	inside  atomic.Int32
+	overlap atomic.Int32
+	writes  atomic.Int32
+}
+
+func (o *pacedDTMFOutput) WriteAudio(ctx context.Context, f frames.OutputAudioFrame) (bool, error) {
+	if o.inside.Add(1) > 1 {
+		o.overlap.Add(1)
+	}
+	defer o.inside.Add(-1)
+	o.writes.Add(1)
+	a := f.AudioData()
+	d := time.Duration(len(a.Audio)/2) * time.Second / time.Duration(a.SampleRate)
+	select {
+	case <-time.After(d):
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+// TestUrgentDTMFIsNotWrittenOverQueuedAudio checks the tones of an urgent
+// keypress are not handed to the transport while the audio loop is in the middle
+// of writing a chunk. A transport encodes what it writes (a serializer resamples
+// it, say), and two writes at once would drive that encoder from two goroutines.
+func TestUrgentDTMFIsNotWrittenOverQueuedAudio(t *testing.T) {
+	params := transport.DefaultParams()
+	params.AudioOutSampleRate = 16000
+	o := &pacedDTMFOutput{}
+	o.BaseOutput = transport.NewBaseOutput("PacedOutput", params, o)
+	task := pipeline.NewWorker(pipeline.New(o), pipeline.WorkerConfig{})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+	defer func() {
+		task.Cancel(context.Background(), "")
+		<-runDone
+	}()
+
+	// One second of audio keeps the audio loop writing while the keypress lands.
+	task.QueueFrame(frames.NewTTSAudioRawFrame(make([]byte, 32000), 16000, 1))
+	deadline := time.Now().Add(3 * time.Second)
+	for o.writes.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the audio loop never started writing")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	before := o.writes.Load()
+	task.QueueFrame(frames.NewOutputDTMFUrgentFrame(frames.KeypadOne))
+
+	// Wait for the tone to be written and for the queued audio to go on.
+	time.Sleep(600 * time.Millisecond)
+	if o.writes.Load() <= before+1 {
+		t.Fatalf("only %d writes after the keypress", o.writes.Load()-before)
+	}
+	if n := o.overlap.Load(); n != 0 {
+		t.Errorf("%d writes were handed to the transport while another was in flight", n)
 	}
 }
 

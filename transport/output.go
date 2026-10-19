@@ -144,11 +144,26 @@ func (bo *BaseOutput) writeDTMFAudio(ctx context.Context, f frames.DTMFOutput) e
 		}
 		audio := frames.NewOutputAudioRawFrame(pcm, bo.sampleRate, 1)
 		audio.SetTransportDestination(f.Base().TransportDestination())
-		if _, err := bo.self.WriteAudio(ctx, audio); err != nil {
+		if _, err := bo.writeAudioFrame(ctx, audio); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// writeAudioFrame hands one frame of audio straight to the transport, outside
+// the audio loop, as an urgent keypress needs. It goes through the sender for
+// the frame's destination, so it waits for a chunk that loop is writing rather
+// than being written on top of it. Before the senders exist there is no loop to
+// collide with, and the frame is written directly.
+func (bo *BaseOutput) writeAudioFrame(ctx context.Context, f frames.OutputAudioFrame) (bool, error) {
+	bo.sendersMu.RLock()
+	s, ok := bo.senders[f.Base().TransportDestination()]
+	bo.sendersMu.RUnlock()
+	if ok {
+		return s.writeTransportAudio(ctx, f)
+	}
+	return bo.self.WriteAudio(ctx, f)
 }
 
 // WriteTransportFrame is the default no-op; a concrete transport overrides it.
