@@ -18,6 +18,9 @@ const windowSecs = 0.4
 // Measuring costs a few hundred microseconds and grows with the sample rate, so
 // it happens on read and the result is cached until more audio arrives. A caller
 // that reports volume less often than it receives audio pays only for the reads.
+// The window and the meter that measures it are kept from one read to the next,
+// so a stream measured at a steady rate allocates nothing once its window is
+// full.
 //
 // Audio is expected to be mono; interleaved channels would be measured as if
 // they were consecutive samples.
@@ -28,6 +31,9 @@ type Tracker struct {
 	windowNumBytes int
 	buf            []byte
 	volume         float64
+	// meter measures the window. It is nil while the sample rate is one no
+	// meter can measure at, which reads as silence.
+	meter *Meter
 	// stale is set once the window holds audio that has not been measured yet.
 	stale bool
 }
@@ -36,7 +42,10 @@ type Tracker struct {
 // and 1 (loud). It reads 0 until the window holds a measurable amount of audio.
 func (t *Tracker) Volume() float64 {
 	if t.stale {
-		t.volume = Volume(t.buf, t.sampleRate)
+		t.volume = 0
+		if t.meter != nil {
+			t.volume = t.meter.volume(t.buf)
+		}
 		t.stale = false
 	}
 	return t.volume
@@ -50,12 +59,24 @@ func (t *Tracker) Update(audio []byte, sampleRate int) {
 		// Rounded up so the window is never a sample short of a gating block,
 		// which loudness rejects.
 		t.windowNumBytes = int(math.Ceil(windowSecs*float64(sampleRate))) * 2
+		switch {
+		case sampleRate < minSampleRate || sampleRate > maxSampleRate:
+			t.meter = nil
+		case t.meter == nil:
+			t.meter = NewMeter(sampleRate)
+		default:
+			t.meter.init(sampleRate)
+		}
 		t.Reset()
 	}
 
 	t.buf = append(t.buf, audio...)
 	if len(t.buf) > t.windowNumBytes {
-		t.buf = t.buf[len(t.buf)-t.windowNumBytes:]
+		// Slide the window down to the front of the buffer rather than slicing
+		// past the old audio, so the buffer's capacity is reused rather than
+		// walked off the end of and reallocated.
+		n := copy(t.buf, t.buf[len(t.buf)-t.windowNumBytes:])
+		t.buf = t.buf[:n]
 	}
 	if len(t.buf) == t.windowNumBytes {
 		t.stale = true
