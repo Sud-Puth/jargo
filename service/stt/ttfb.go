@@ -69,16 +69,25 @@ func (t *ttfbTracker) setTimeout(d time.Duration) {
 // speechStarted drops what was being measured. The utterance it belonged to is
 // over, and a transcript arriving now belongs to the new one.
 func (t *ttfbTracker) speechStarted() {
-	t.stopDeadline()
+	t.reset()
 	t.mu.Lock()
 	t.lastTranscript = time.Time{}
 	t.mu.Unlock()
 }
 
-// interrupted drops the deadline but leaves what has arrived, since an
-// interruption can land while the user is still speaking.
+// interrupted drops what was being measured but leaves the transcripts that
+// have arrived, since an interruption can land while the user is still
+// speaking.
 func (t *ttfbTracker) interrupted() {
+	t.reset()
+}
+
+// reset ends the deadline and drops the measurement without reporting it, so a
+// transcript arriving without a speech end of its own is not measured against
+// one that no longer stands.
+func (t *ttfbTracker) reset() {
 	t.stopDeadline()
+	t.abandon()
 }
 
 // speechEnded starts measuring from the moment the speech itself ended. A VAD
