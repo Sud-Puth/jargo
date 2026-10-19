@@ -410,17 +410,36 @@ type StreamService struct {
 	reopening bool
 	// held is the audio that arrived while the session was being replaced, sent
 	// on once the new one is up so the words spoken across the gap are not lost.
-	held [][]byte
+	held []heldAudio
 
 	// muted records that an STTMuteFrame asked for the audio to go
 	// untranscribed. The audio arriving while it stands is dropped rather than
 	// sent, so it is neither transcribed nor billed.
 	muted bool
+	// userID is the user the audio last sent was attributed to, "" when it
+	// named nobody. The transcripts the service emits carry it.
+	userID string
 
 	// settingsMu serializes reading the provider's settings against changing
 	// them. A session is opened from the read loop when one drops, and an update
 	// set applies settings updates to the provider's own store.
 	set *providerSettings
+}
+
+// heldAudio is a chunk held while the session is being replaced, with the user
+// it was attributed to.
+type heldAudio struct {
+	audio  []byte
+	userID string
+}
+
+// audioUserID is the user an input audio frame is attributed to, "" for audio
+// that names nobody.
+func audioUserID(f frames.InputAudioFrame) string {
+	if u, ok := f.(*frames.UserAudioRawFrame); ok {
+		return u.UserID
+	}
+	return ""
 }
 
 // CurrentSettings is the service's current settings, for code outside the
@@ -544,8 +563,8 @@ func (s *StreamService) ProcessFrame(ctx context.Context, f frames.Frame, dir pr
 	switch fr := f.(type) {
 	case *frames.StartFrame:
 		return s.PushFrame(ctx, f, dir)
-	case *frames.InputAudioRawFrame:
-		s.sendAudio(fr.Audio)
+	case frames.InputAudioFrame:
+		s.sendAudio(fr.AudioData().Audio, audioUserID(fr))
 		return s.PushFrame(ctx, f, dir)
 	case *frames.STTUpdateSettingsFrame:
 		if !fr.TargetsService(s) {
@@ -847,11 +866,12 @@ func (s *StreamService) setMuted(mute bool) {
 // here again once the new one is up. Otherwise the chunk is dropped while the
 // service is muted, and when it can no longer do its job: one that cannot
 // transcribe anything would drop the chunk anyway, and one that connects on
-// demand would attempt a handshake per chunk to do it.
-func (s *StreamService) sendAudio(audio []byte) {
+// demand would attempt a handshake per chunk to do it. A chunk that is sent
+// attributes the transcripts after it to userID.
+func (s *StreamService) sendAudio(audio []byte, userID string) {
 	s.mu.Lock()
 	if s.reopening {
-		s.held = append(s.held, audio)
+		s.held = append(s.held, heldAudio{audio: audio, userID: userID})
 		s.mu.Unlock()
 		return
 	}
@@ -863,7 +883,17 @@ func (s *StreamService) sendAudio(audio []byte) {
 	if !s.Usable() {
 		return
 	}
+	s.mu.Lock()
+	s.userID = userID
+	s.mu.Unlock()
 	s.send(audio)
+}
+
+// transcriptUserID is the user the transcripts emitted now are attributed to.
+func (s *StreamService) transcriptUserID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.userID
 }
 
 // reportConnectionError puts a lost provider connection on the pipeline. It is
@@ -961,8 +991,8 @@ func (s *StreamService) reopen(ctx context.Context) {
 	s.held = nil
 	s.mu.Unlock()
 
-	for _, audio := range held {
-		s.sendAudio(audio)
+	for _, h := range held {
+		s.sendAudio(h.audio, h.userID)
 	}
 }
 
@@ -971,7 +1001,7 @@ func (s *StreamService) send(audio []byte) {
 	if s.reopening {
 		// The session is being replaced. Hold the audio rather than send it to
 		// one that is going away, or the words spoken across the gap are lost.
-		s.held = append(s.held, audio)
+		s.held = append(s.held, heldAudio{audio: audio, userID: s.userID})
 		s.mu.Unlock()
 		return
 	}
@@ -1284,7 +1314,7 @@ func (s *StreamService) emitEagerEndOfTurn(ctx context.Context, r Result) {
 	case r.EagerEndOfTurn:
 		s.eagerPending = true
 		slog.DebugContext(ctx, "eager end of turn", "service", s.Name(), "text", r.Text)
-		f := frames.NewEagerTranscriptionFrame(r.Text, "", frames.NowTimestamp())
+		f := frames.NewEagerTranscriptionFrame(r.Text, s.transcriptUserID(), frames.NowTimestamp())
 		f.Language = r.Language
 		_ = s.PushFrame(ctx, f, processor.Downstream)
 	case r.EagerEndOfTurnWithdrawn:
@@ -1330,12 +1360,12 @@ func (s *StreamService) emitTranscript(ctx context.Context, r Result) {
 	}
 	ts := frames.NowTimestamp()
 	if !r.Final {
-		f := frames.NewInterimTranscriptionFrame(r.Text, "", ts)
+		f := frames.NewInterimTranscriptionFrame(r.Text, s.transcriptUserID(), ts)
 		f.Language = r.Language
 		_ = s.PushFrame(ctx, f, processor.Downstream)
 		return
 	}
-	f := frames.NewTranscriptionFrame(r.Text, "", ts)
+	f := frames.NewTranscriptionFrame(r.Text, s.transcriptUserID(), ts)
 	f.Finalized = r.EndOfTurn
 	f.Language = r.Language
 	_ = s.PushFrame(ctx, f, processor.Downstream)

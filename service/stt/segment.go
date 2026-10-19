@@ -81,6 +81,9 @@ type SegmentService struct {
 	// not stop the buffering: a segment is cut by the VAD, and the speech in it
 	// is transcribed whatever the mute state was while it was gathered.
 	muted bool
+	// userID is the user the audio last buffered was attributed to, "" when it
+	// named nobody. The transcripts the service emits carry it.
+	userID string
 }
 
 // CurrentSettings is the service's current settings, for code outside the
@@ -235,8 +238,8 @@ func (s *SegmentService) ProcessFrame(ctx context.Context, f frames.Frame, dir p
 		s.mu.Unlock()
 		slog.Debug("stt service mute changed", "service", s.Name(), "muted", fr.Mute)
 		return nil
-	case *frames.InputAudioRawFrame:
-		s.bufferAudio(fr.Audio)
+	case frames.InputAudioFrame:
+		s.bufferAudio(fr.AudioData().Audio, audioUserID(fr))
 		return s.PushFrame(ctx, f, dir)
 	case *frames.VADUserStartedSpeakingFrame:
 		s.ttfb.speechStarted()
@@ -264,10 +267,11 @@ func (s *SegmentService) ProcessFrame(ctx context.Context, f frames.Frame, dir p
 // bufferAudio adds audio to the segment being gathered. While the user is
 // speaking the buffer keeps growing; while they are not, only the last second
 // is kept, to cover the delay between the speech starting and the VAD
-// reporting it.
-func (s *SegmentService) bufferAudio(audio []byte) {
+// reporting it. The transcripts after it are attributed to userID.
+func (s *SegmentService) bufferAudio(audio []byte, userID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.userID = userID
 	s.buf = append(s.buf, audio...)
 	if !s.speaking && len(s.buf) > s.preRoll {
 		s.buf = append([]byte(nil), s.buf[len(s.buf)-s.preRoll:]...)
@@ -431,7 +435,10 @@ func (s *SegmentService) transcribe(ctx context.Context, audio []byte, rate int)
 	if text == "" {
 		return
 	}
-	tf := frames.NewTranscriptionFrame(text, "", frames.NowTimestamp())
+	s.mu.Lock()
+	userID := s.userID
+	s.mu.Unlock()
+	tf := frames.NewTranscriptionFrame(text, userID, frames.NowTimestamp())
 	tf.Finalized = true
 	_ = s.PushFrame(ctx, tf, processor.Downstream)
 }

@@ -41,6 +41,15 @@ type OutputAudioFrame interface {
 	isOutputAudio()
 }
 
+// InputAudioFrame is implemented by every frame carrying audio from an input
+// transport: plain input audio, and input audio attributed to the user who spoke
+// it. Assert this interface rather than a concrete type, so audio keeps being
+// handled whichever kind the transport produced.
+type InputAudioFrame interface {
+	AudioFrame
+	isInputAudio()
+}
+
 // NumFrames is the number of audio frames (samples per channel) in the buffer:
 // len(Audio) / (NumChannels * 2) for 16-bit PCM. It is 0 when NumChannels is
 // unset. It is derived on each call, so it stays correct when Audio is replaced.
@@ -58,6 +67,9 @@ type InputAudioRawFrame struct {
 	BaseSystemFrame
 	AudioRawData
 }
+
+// isInputAudio marks this frame and the ones embedding it as input audio.
+func (*InputAudioRawFrame) isInputAudio() {}
 
 // NewInputAudioRawFrame builds an InputAudioRawFrame from PCM audio.
 func NewInputAudioRawFrame(audio []byte, sampleRate, numChannels int) *InputAudioRawFrame {
@@ -136,6 +148,9 @@ var (
 	_ DataFrame   = (*OutputAudioRawFrame)(nil)
 	_ DataFrame   = (*TTSAudioRawFrame)(nil)
 	_ DataFrame   = (*SpeechOutputAudioRawFrame)(nil)
+
+	_ InputAudioFrame = (*InputAudioRawFrame)(nil)
+	_ InputAudioFrame = (*UserAudioRawFrame)(nil)
 )
 
 // UserAudioRawFrame is a chunk of input audio attributed to the user who spoke
