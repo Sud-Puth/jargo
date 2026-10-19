@@ -1401,7 +1401,7 @@ func (a slowAnalyzer) AnalyzeEndOfTurn() (turn.EndOfTurnState, float64, error) {
 func (slowAnalyzer) SpeechTriggered() bool      { return false }
 func (slowAnalyzer) Params() turn.Params        { return turn.DefaultParams() }
 func (slowAnalyzer) Clear()                     {}
-func (slowAnalyzer) Close() error               { return nil }
+func (slowAnalyzer) Cleanup() error             { return nil }
 func (slowAnalyzer) UpdateVADStartSecs(float64) {}
 
 // The STT safety net is anchored to the end of the user's speech, so the time

@@ -29,7 +29,7 @@ func TestSmartTurnModelMatchesReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSmartTurnV3: %v", err)
 	}
-	defer func() { _ = s.Close() }()
+	defer func() { _ = s.Cleanup() }()
 
 	features := computeLogMel(refAudio())
 	prob, err := s.runModel(features)
@@ -47,5 +47,56 @@ func TestSmartTurnModelMatchesReference(t *testing.T) {
 	// And the decision the pipeline actually takes from it.
 	if prob <= 0.5 {
 		t.Errorf("smart-turn probability = %v, want the turn read as complete", prob)
+	}
+}
+
+// The model session is the native resource the analyzer holds, and Cleanup is
+// what releases it. It needs the ONNX runtime.
+func TestSmartTurnCleanupReleasesTheSession(t *testing.T) {
+	if !onnxrt.Available() {
+		t.Skip("ONNX runtime not configured; set JARGO_ONNXRUNTIME_LIB")
+	}
+
+	s, err := NewSmartTurnV3()
+	if err != nil {
+		t.Fatalf("NewSmartTurnV3: %v", err)
+	}
+	if s.session == nil {
+		t.Fatal("a new analyzer holds no session")
+	}
+
+	if err := s.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if s.session != nil {
+		t.Error("the session is still held after Cleanup")
+	}
+}
+
+// Cleaning up is not only teardown. A turn strategy is cleaned up and set up
+// again whenever the strategies are updated, so an analyzer that released its
+// session for good would leave end-of-turn detection dead for the rest of the
+// session. It needs the ONNX runtime.
+func TestSmartTurnAnalyzesAgainAfterCleanup(t *testing.T) {
+	if !onnxrt.Available() {
+		t.Skip("ONNX runtime not configured; set JARGO_ONNXRUNTIME_LIB")
+	}
+
+	s, err := NewSmartTurnV3()
+	if err != nil {
+		t.Fatalf("NewSmartTurnV3: %v", err)
+	}
+	defer func() { _ = s.Cleanup() }()
+	s.SetSampleRate(melSR)
+
+	speech := make([]byte, melSR/50*2) // 20 ms
+	for i := range 2 {
+		s.AppendAudio(speech, true)
+		if _, _, err := s.AnalyzeEndOfTurn(); err != nil {
+			t.Fatalf("analysis %d: %v", i+1, err)
+		}
+		if err := s.Cleanup(); err != nil {
+			t.Fatalf("Cleanup %d: %v", i+1, err)
+		}
 	}
 }

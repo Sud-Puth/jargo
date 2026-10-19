@@ -74,9 +74,9 @@ func NewHTTPSmartTurn(cfg HTTPConfig) (*HTTPSmartTurn, error) {
 	return s, nil
 }
 
-// Close releases nothing: the analyzer holds no session of its own, and the
+// Cleanup releases nothing: the analyzer holds no session of its own, and the
 // client it posts with belongs to whoever configured it.
-func (s *HTTPSmartTurn) Close() error { return nil }
+func (s *HTTPSmartTurn) Cleanup() error { return nil }
 
 // httpPrediction is the answer the service returns.
 type httpPrediction struct {

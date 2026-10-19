@@ -260,7 +260,7 @@ func (stubAnalyzer) SpeechTriggered() bool      { return false }
 func (stubAnalyzer) UpdateVADStartSecs(float64) {}
 func (stubAnalyzer) Params() turn.Params        { return turn.DefaultParams() }
 func (stubAnalyzer) Clear()                     {}
-func (stubAnalyzer) Close() error               { return nil }
+func (stubAnalyzer) Cleanup() error             { return nil }
 
 // countingStop is a stop strategy that counts how many times it is cleaned up,
 // standing in for one holding a resource it hands back there.

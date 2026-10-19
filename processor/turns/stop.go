@@ -331,8 +331,19 @@ func (s *TurnAnalyzerStop) Setup(st processor.Setup) error {
 	return nil
 }
 
-// Cleanup stops the timeout.
-func (s *TurnAnalyzerStop) Cleanup() { s.cancel() }
+// Cleanup releases what the analyzer holds and stops the timeout.
+//
+// The analyzer stays usable, since the strategy itself may be set up again
+// when the strategies are updated; it reacquires what it released when the
+// next turn needs it.
+func (s *TurnAnalyzerStop) Cleanup() {
+	if s.analyzer != nil {
+		if err := s.analyzer.Cleanup(); err != nil {
+			slog.Warn("turns: releasing the end-of-turn analyzer failed", "err", err)
+		}
+	}
+	s.cancel()
+}
 
 // SpeechTimeoutConfig configures a SpeechTimeoutStop strategy.
 type SpeechTimeoutConfig struct {

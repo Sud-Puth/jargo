@@ -78,6 +78,13 @@ type Analyzer interface {
 	Params() Params
 	// Clear resets the analyzer to its initial state.
 	Clear()
-	// Close releases any resources (for example a model session).
-	Close() error
+	// Cleanup releases the resources the analyzer holds, a model session for
+	// example. The turn strategy driving the analyzer calls it when it is
+	// cleaned up itself.
+	//
+	// The analyzer stays usable afterwards. Cleaning up is not only teardown: a
+	// turn strategy is cleaned up and set up again whenever the strategies are
+	// updated, so what Cleanup released is acquired again when the next turn
+	// needs it.
+	Cleanup() error
 }

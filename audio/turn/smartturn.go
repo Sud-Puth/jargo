@@ -176,6 +176,8 @@ func (b *smartTurnBase) processSpeechSegment() (EndOfTurnState, float64, error) 
 // SmartTurnV3 is an end-of-turn Analyzer backed by the smart-turn-v3 ONNX model.
 type SmartTurnV3 struct {
 	*smartTurnBase
+	// session runs the model. Cleanup releases it and the next turn that needs
+	// it opens it again, so it is nil between the two.
 	session *onnxrt.Session
 }
 
@@ -195,6 +197,18 @@ func NewSmartTurnV3(opts ...TurnOption) (*SmartTurnV3, error) {
 		opt(&params)
 	}
 
+	session, err := newSmartTurnSession()
+	if err != nil {
+		return nil, err
+	}
+
+	s := &SmartTurnV3{session: session}
+	s.smartTurnBase = newSmartTurnBase(s, params)
+	return s, nil
+}
+
+// newSmartTurnSession opens a session on the embedded model.
+func newSmartTurnSession() (*onnxrt.Session, error) {
 	// One thread per Run, for the reason given in the VAD analyzer: this model
 	// runs only at the end of an utterance, so a spinning pool sized to the host
 	// burns cores between inferences without making any of them faster.
@@ -204,10 +218,20 @@ func NewSmartTurnV3(opts ...TurnOption) (*SmartTurnV3, error) {
 	if err != nil {
 		return nil, fmt.Errorf("turn: load Smart Turn model: %w", err)
 	}
+	return session, nil
+}
 
-	s := &SmartTurnV3{session: session}
-	s.smartTurnBase = newSmartTurnBase(s, params)
-	return s, nil
+// modelSession is the session the model runs on, opened again the first time
+// it is needed after a Cleanup.
+func (s *SmartTurnV3) modelSession() (*onnxrt.Session, error) {
+	if s.session == nil {
+		session, err := newSmartTurnSession()
+		if err != nil {
+			return nil, err
+		}
+		s.session = session
+	}
+	return s.session, nil
 }
 
 // predictEndpoint computes Whisper log-mel features over the last 8 seconds of
@@ -230,7 +254,11 @@ func (s *SmartTurnV3) predictEndpoint(audio []float32) (bool, float64, error) {
 // runModel runs the model on a precomputed [80*800] feature matrix and returns
 // the completion probability. The model's output is already sigmoid-activated.
 func (s *SmartTurnV3) runModel(features []float32) (float64, error) {
-	outs, err := s.session.Run([]onnxrt.Tensor{
+	session, err := s.modelSession()
+	if err != nil {
+		return 0, err
+	}
+	outs, err := session.Run([]onnxrt.Tensor{
 		onnxrt.Float32([]int64{1, nMels, nFrames}, features),
 	})
 	if err != nil {
@@ -242,8 +270,10 @@ func (s *SmartTurnV3) runModel(features []float32) (float64, error) {
 	return float64(outs[0].F32[0]), nil
 }
 
-// Close releases the model session.
-func (s *SmartTurnV3) Close() error {
+// Cleanup releases the model session, the native resource the analyzer holds.
+// The analyzer stays usable: the session is opened again when the next turn
+// needs it.
+func (s *SmartTurnV3) Cleanup() error {
 	if s.session == nil {
 		return nil
 	}

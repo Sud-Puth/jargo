@@ -142,7 +142,7 @@ func (fakeTurn) SpeechTriggered() bool      { return false }
 func (fakeTurn) Params() turn.Params        { return turn.DefaultParams() }
 func (fakeTurn) UpdateVADStartSecs(float64) {}
 func (fakeTurn) Clear()                     {}
-func (fakeTurn) Close() error               { return nil }
+func (fakeTurn) Cleanup() error             { return nil }
 
 // TestTurnAnalyzerStop covers the Smart-Turn stop: the model reports complete on
 // VAD stop and a finalized transcript closes the turn.
