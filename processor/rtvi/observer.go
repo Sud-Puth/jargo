@@ -36,6 +36,13 @@ type Observer struct {
 	botSpeaking bool
 	// queuedSegments are the segments waiting for the bot to start speaking.
 	queuedSegments []segment
+	// skippedSegmentIDs are the skipped segments whose spoken text may still
+	// come: the words a segment is spoken in carry their own aggregation type,
+	// so they are recognized as part of a skipped segment by its id instead.
+	skippedSegmentIDs map[uint64]struct{}
+	// skippedSegmentsInterrupted is whether an interruption cut off the skipped
+	// segments still remembered.
+	skippedSegmentsInterrupted bool
 
 	// paramsMu guards params, which a ConfigureObserverFrame rewrites while the
 	// pipeline is running.
@@ -177,7 +184,8 @@ type ObserverParams struct {
 	// RemoveBotOutputTransformer.
 	BotOutputTransforms []BotOutputTransformer
 	// SkipAggregatorTypes are the aggregation types not reported as bot output
-	// or spoken text. It keeps a unit the bot produces but should not show from
+	// or spoken text, and neither are the words a skipped segment is spoken in
+	// or the progress through it. It keeps a unit the bot produces but should not show from
 	// the client's view, a pattern-matched block carrying something private
 	// being the case for it. A client can still be told about it through the
 	// model's own text, so turn BotLLMEnabled off alongside this when that is
@@ -532,11 +540,71 @@ func (o *Observer) skipsAggregation(by frames.AggregationType) bool {
 	return slices.Contains(o.params.SkipAggregatorTypes, by)
 }
 
+// isSkipped reports whether a segment is kept from the client, by its own
+// aggregation type or by that of the segment it was spoken in.
+//
+// A skipped segment the synthesizer will speak is remembered, so the words it is
+// spoken in are skipped with it: they carry the word type rather than the
+// segment's, and only the segment id ties them to it.
+func (o *Observer) isSkipped(seg segment) bool {
+	var segmentID uint64
+	if seg.spoken {
+		segmentID = seg.segmentID
+	}
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.skipsAggregation(seg.frame.AggregatedBy) {
+		switch {
+		case segmentID != 0:
+			// The segment spoken in one piece: no words of it follow.
+			delete(o.skippedSegmentIDs, segmentID)
+		case seg.frame.WillBeSpoken:
+			if o.skippedSegmentIDs == nil {
+				o.skippedSegmentIDs = make(map[uint64]struct{})
+			}
+			o.skippedSegmentIDs[seg.frame.ID()] = struct{}{}
+		}
+		return true
+	}
+	if segmentID == 0 {
+		return false
+	}
+	_, skipped := o.skippedSegmentIDs[segmentID]
+	return skipped
+}
+
+// skippedSegmentSpoken forgets a skipped segment once its last word has been
+// spoken, since nothing more of it can come.
+func (o *Observer) skippedSegmentSpoken(segmentID uint64) {
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	delete(o.skippedSegmentIDs, segmentID)
+}
+
+// interrupted records that an interruption cut off the bot's output, and with
+// it the skipped segments still remembered.
+func (o *Observer) interrupted() {
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	o.skippedSegmentsInterrupted = true
+}
+
+// forgetInterruptedSegmentsLocked forgets the skipped segments an interruption
+// cut off. By the time the bot next starts or stops speaking, the output
+// transport has dropped the interrupted words, so none of them can still come.
+func (o *Observer) forgetInterruptedSegmentsLocked() {
+	if o.skippedSegmentsInterrupted {
+		clear(o.skippedSegmentIDs)
+		o.skippedSegmentsInterrupted = false
+	}
+}
+
 // startedSpeaking records that the bot's audio is playing and returns the
 // segments held while it was silent, for reporting now that they are audible.
 func (o *Observer) startedSpeaking() []segment {
 	o.outputMu.Lock()
 	defer o.outputMu.Unlock()
+	o.forgetInterruptedSegmentsLocked()
 	held := o.queuedSegments
 	o.queuedSegments = nil
 	o.botSpeaking = true
@@ -547,6 +615,7 @@ func (o *Observer) startedSpeaking() []segment {
 func (o *Observer) stoppedSpeaking() {
 	o.outputMu.Lock()
 	defer o.outputMu.Unlock()
+	o.forgetInterruptedSegmentsLocked()
 	o.botSpeaking = false
 }
 

@@ -335,6 +335,7 @@ func (o *Observer) botMessageFor(f frames.Frame) (Message, bool) {
 		// The bot's in-flight output was cut off, by a VAD barge-in or by a
 		// programmatic interrupt such as send-text with run_immediately. A client
 		// drops whatever the bot was mid-saying.
+		o.interrupted()
 		return o.gated(event(TypeBotInterrupted), botSpeakingOf)
 	case *frames.LLMFullResponseStartFrame:
 		return o.gated(event(TypeBotLLMStarted), botLLMOf)
@@ -494,7 +495,7 @@ func (o *Observer) reportSegment(seg segment) []Message {
 // it says, and separately the caption for text the synthesizer has spoken.
 func (o *Observer) segmentMessages(seg segment) []Message {
 	agg := seg.frame
-	if o.skipsAggregation(agg.AggregatedBy) {
+	if o.isSkipped(seg) {
 		return nil
 	}
 
@@ -555,6 +556,15 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 // An older client is told nothing: it has no notion of progress within a
 // segment, and hears about each word as output of its own instead.
 func (o *Observer) progressMessages(fr *frames.AggregatedTextProgressFrame) []Message {
+	// Progress through a skipped segment would give away the text the segment
+	// was skipped to keep from the client.
+	if o.skipsAggregation(fr.AggregatedBy) {
+		if fr.RemainingText == "" {
+			// The skipped segment's last word has been spoken.
+			o.skippedSegmentSpoken(fr.SegmentID)
+		}
+		return nil
+	}
 	if o.isLegacyClient() || !o.enabled(botOutputOf) {
 		return nil
 	}
