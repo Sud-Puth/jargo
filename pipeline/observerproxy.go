@@ -3,10 +3,12 @@ package pipeline
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/internal/goid"
 	"github.com/gojargo/jargo/processor"
 )
 
@@ -64,6 +66,9 @@ type observerWorker struct {
 	stopping sync.Once
 	// draining makes finish idempotent.
 	draining sync.Once
+	// goroutine is the number of the goroutine delivering to the observer, so
+	// an observer removing itself from one of its own callbacks is recognized.
+	goroutine atomic.Uint64
 }
 
 // pipelineStarted is what a worker queues to itself to report the pipeline
@@ -154,6 +159,10 @@ func (p *observerProxy) add(o processor.Observer) {
 
 // remove drops an observer while the pipeline runs. It stops reporting to it
 // before returning, so a caller may release whatever the observer holds.
+//
+// An observer removing itself does so from one of its own callbacks, on the
+// goroutine delivering to it, which cannot wait for itself to end. Its worker is
+// told to stop instead, and ends once the callback returns.
 func (p *observerProxy) remove(o processor.Observer) {
 	p.mu.Lock()
 	var found *observerWorker
@@ -171,9 +180,14 @@ func (p *observerProxy) remove(o processor.Observer) {
 
 	// Nothing is running before the pipeline starts, so there is no goroutine to
 	// end: dropping it from the list is the whole of it.
-	if found != nil && started {
-		found.cancel()
+	if found == nil || !started {
+		return
 	}
+	if found.onWorkerGoroutine() {
+		found.stop()
+		return
+	}
+	found.cancel()
 }
 
 // pipelineStarted reports the pipeline having started to every observer. It goes
@@ -247,6 +261,7 @@ func (p *observerProxy) send(data any) {
 // or has delivered everything left to it.
 func (w *observerWorker) run() {
 	defer close(w.done)
+	w.goroutine.Store(goid.Current())
 	for {
 		data, ok := w.queue.get(w.quit, w.finishing)
 		if !ok {
@@ -271,8 +286,21 @@ func (w *observerWorker) finish() {
 // cancel ends this worker's goroutine and waits for it to finish. It is safe to
 // call more than once, and from more than one goroutine.
 func (w *observerWorker) cancel() {
-	w.stopping.Do(func() { close(w.quit) })
+	w.stop()
 	<-w.done
+}
+
+// stop tells this worker's goroutine to end without waiting for it: it returns
+// once the report it is delivering, if any, has been delivered.
+func (w *observerWorker) stop() {
+	w.stopping.Do(func() { close(w.quit) })
+}
+
+// onWorkerGoroutine reports whether the caller is the goroutine delivering to
+// this worker's observer.
+func (w *observerWorker) onWorkerGoroutine() bool {
+	id := w.goroutine.Load()
+	return id != 0 && id == goid.Current()
 }
 
 // deliver passes one report to the observer.

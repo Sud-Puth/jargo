@@ -523,6 +523,9 @@ func (t *Worker) AddObserver(o Observer) {
 // RemoveObserver stops reporting to an observer registered earlier. It has
 // stopped by the time this returns, so whatever the observer holds may be
 // released. Removing one that was never registered does nothing.
+//
+// An observer may remove itself from one of its own callbacks. It cannot wait
+// for itself, so it is told nothing more once that callback returns.
 func (t *Worker) RemoveObserver(o Observer) {
 	if o == nil {
 		return

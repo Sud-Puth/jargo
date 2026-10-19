@@ -6,20 +6,18 @@
 package processor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"runtime/debug"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gojargo/jargo/clock"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/internal/goid"
 	"github.com/gojargo/jargo/telemetry/metrics"
 	"github.com/gojargo/jargo/telemetry/tracing"
 	errs "github.com/gojargo/jargo/utils/errors"
@@ -580,7 +578,7 @@ func (b *Base) baseContext() context.Context {
 // are what the interruption drops.
 func (b *Base) processLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
-	b.procGoroutine.Store(goroutineID())
+	b.procGoroutine.Store(goid.Current())
 	for {
 		b.setCurFrame(nil)
 		it, ok := b.procQueue.get(ctx)
@@ -1019,21 +1017,7 @@ func (b *Base) stopProcessTask() (wait func()) {
 // process goroutine.
 func (b *Base) onProcessGoroutine() bool {
 	id := b.procGoroutine.Load()
-	return id != 0 && id == goroutineID()
-}
-
-// goroutineID returns the runtime's number for the calling goroutine, read from
-// the header of its stack trace ("goroutine 18 [running]:"). It is only used to
-// recognize a goroutine, never to address one.
-func goroutineID() uint64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	field := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
-	if i := bytes.IndexByte(field, ' '); i >= 0 {
-		field = field[:i]
-	}
-	id, _ := strconv.ParseUint(string(field), 10, 64)
-	return id
+	return id != 0 && id == goid.Current()
 }
 
 // reportPanic pushes upstream an error for a panic caught while this processor

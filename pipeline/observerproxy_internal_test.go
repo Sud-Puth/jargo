@@ -50,3 +50,45 @@ func TestAFrameIsForgottenOnceThePipelineLetsGoOfIt(t *testing.T) {
 	}
 	runtime.KeepAlive(kept)
 }
+
+// selfRemovingObserver removes itself from the proxy on the first text frame it
+// is told about, and counts every push it hears.
+type selfRemovingObserver struct {
+	p       *observerProxy
+	removed chan struct{}
+	pushes  chan struct{}
+}
+
+func (o *selfRemovingObserver) OnPushFrame(d processor.FramePushed) {
+	o.pushes <- struct{}{}
+	if _, ok := d.Frame.(*frames.TextFrame); ok {
+		o.p.remove(o)
+		close(o.removed)
+	}
+}
+
+// TestAnObserverCanBeRemovedFromItsOwnCallback checks an observer removing
+// itself from one of its own callbacks does not wait for itself, and hears
+// nothing more once the callback has returned.
+func TestAnObserverCanBeRemovedFromItsOwnCallback(t *testing.T) {
+	o := &selfRemovingObserver{removed: make(chan struct{}), pushes: make(chan struct{}, 16)}
+	p := newObserverProxy([]processor.Observer{o})
+	o.p = p
+	p.start()
+	defer p.stop()
+
+	p.OnPushFrame(processor.FramePushed{Frame: frames.NewTextFrame("hi")})
+	select {
+	case <-o.removed:
+	case <-time.After(time.Second):
+		t.Fatal("an observer removing itself from its own callback deadlocked")
+	}
+	<-o.pushes
+
+	p.OnPushFrame(processor.FramePushed{Frame: frames.NewTextFrame("after")})
+	select {
+	case <-o.pushes:
+		t.Error("a removed observer was still told about a frame")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
