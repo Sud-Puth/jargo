@@ -251,6 +251,9 @@ type Base struct {
 	// wait for the queue it asked to shut down.
 	ctxDone chan struct{}
 	ctxWG   sync.WaitGroup
+	// stopFrameTimeout is how long a context waits for more audio before it is
+	// taken as finished.
+	stopFrameTimeout time.Duration
 
 	// yieldsSync records whether the provider answered the last call with its
 	// audio, which is what says who closes the context out.
@@ -322,7 +325,7 @@ func (b *Base) model() string {
 // New builds a TTS Base named name driven by syn. The concrete service passes
 // itself as syn and embeds the returned Base.
 func New(name string, syn Synthesizer) *Base {
-	b := &Base{syn: syn, zeroAudioLimit: defaultZeroAudioContextLimit}
+	b := &Base{syn: syn, zeroAudioLimit: defaultZeroAudioContextLimit, stopFrameTimeout: defaultStopFrameTimeout}
 	// Sentences are found in the language the service speaks, English when its
 	// settings name none.
 	b.aggregator = ttstext.NewSimpleAggregator(frames.AggregationSentence, settingsLanguage(syn))
@@ -608,9 +611,9 @@ func (b *Base) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.D
 	case *frames.LLMFullResponseStartFrame:
 		b.setLLMResponding(true)
 		// A new turn gets one context id, shared by all of its sentences.
-		b.turnContext = b.createContextID()
+		b.setTurnContextID(b.createContextID())
 		if c, ok := b.syn.(TurnContextCreator); ok {
-			c.OnTurnContextCreated(ctx, b.turnContext)
+			c.OnTurnContextCreated(ctx, b.turnContextID())
 		}
 		// Through the serialization queue, so this frame is emitted only after any
 		// context already queued has drained rather than racing ahead of it.
@@ -789,7 +792,7 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	// Streaming tokens, a sentence the response ended without punctuating is
 	// still pending in the sequencer, waiting on a boundary that is not coming.
 	// It is promoted now, or its words would never be spoken into the context.
-	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContext), b.turnContext)
+	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContextID()), b.turnContextID())
 	// Pause before the flag is cleared: a turn that sent no text, a function
 	// call and nothing else, has no audio to wait for.
 	b.maybePauseFrameProcessing()
@@ -839,13 +842,29 @@ func (b *Base) queueSerial(ctx context.Context, f frames.Frame, dir processor.Di
 // createContextID returns the turn's context id, so every sentence of a turn is
 // synthesized on one context, or a fresh one outside a turn.
 func (b *Base) createContextID() string {
-	if b.turnContext != "" {
+	if id := b.turnContextID(); id != "" {
 		// Keep the open context from timing out while the next sentence is still
 		// being generated.
-		b.refreshAudioContext(b.turnContext)
-		return b.turnContext
+		b.refreshAudioContext(id)
+		return id
 	}
 	return uuid.NewString()
+}
+
+// turnContextID is the context the current turn is spoken on, or "" between
+// turns. It is read by a provider's receive loop as well as the frame
+// goroutine, which is why it goes through the lock.
+func (b *Base) turnContextID() string {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	return b.turnContext
+}
+
+// setTurnContextID records the context the current turn is spoken on.
+func (b *Base) setTurnContextID(id string) {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	b.turnContext = id
 }
 
 // onTurnContextCompleted closes the turn out once its text has all been sent.
@@ -853,8 +872,8 @@ func (b *Base) createContextID() string {
 // receive loop the context is removed when the provider marks it final, and for
 // one that returns its audio inline the base closes it here.
 func (b *Base) onTurnContextCompleted(ctx context.Context) {
-	id := b.turnContext
-	b.turnContext = ""
+	id := b.turnContextID()
+	b.setTurnContextID("")
 	if id == "" {
 		return
 	}
@@ -904,7 +923,7 @@ func (b *Base) handleInterruption(ctx context.Context) {
 	if b.sequencer != nil {
 		b.sequencer.Clear()
 	}
-	b.turnContext = ""
+	b.setTurnContextID("")
 	b.audioCtxMu.Lock()
 	b.wordLastPTS = 0
 	b.audioCtxMu.Unlock()
@@ -936,15 +955,15 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	// A fixed utterance is independent of any LLM turn, so it gets a context of
 	// its own that is opened and closed around it. Whether a turn was mid-flight
 	// is saved and put back, so speaking this does not look like the end of one.
-	saved := b.turnContext
+	saved := b.turnContextID()
 	savedProcessing := b.isProcessingText()
 	// The utterance opens a context of its own, so its leading whitespace is its
 	// own to drop; whatever the interrupted turn had sent is put back after.
 	savedSentNonWhitespace := b.sentNonWhitespace()
 	b.setSentNonWhitespace(false)
-	b.turnContext = b.createContextID()
+	b.setTurnContextID(b.createContextID())
 	if c, ok := b.syn.(TurnContextCreator); ok {
-		c.OnTurnContextCreated(ctx, b.turnContext)
+		c.OnTurnContextCreated(ctx, b.turnContextID())
 	}
 	// A fixed utterance was never aggregated, so it stands as one sentence and
 	// the text is its own written form.
@@ -955,11 +974,11 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	// Streaming tokens, the utterance is held as a pending sentence with no
 	// following token to confirm its boundary, so it is promoted here or it is
 	// never spoken into the context.
-	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContext), b.turnContext)
+	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContextID()), b.turnContextID())
 	b.onTurnContextCompleted(ctx)
 	// Text went to the provider, so pause for the audio it will produce.
 	b.maybePauseFrameProcessing()
-	b.turnContext = saved
+	b.setTurnContextID(saved)
 	b.setProcessingText(savedProcessing)
 	b.setSentNonWhitespace(savedSentNonWhitespace)
 	return nil

@@ -3,6 +3,7 @@ package tts
 import (
 	"cmp"
 	"context"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -18,9 +19,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// stopFrameTimeout is how long an audio context waits for more audio before it
-// is taken as finished and its stop frame is pushed.
-const stopFrameTimeout = 3 * time.Second
+// defaultStopFrameTimeout is how long an audio context waits for more audio
+// before it is taken as finished and its stop frame is pushed.
+const defaultStopFrameTimeout = 3 * time.Second
 
 // AudioContextHost is the part of the Base a ContextSynthesizer pushes its audio
 // into. A provider whose audio arrives on its own receive loop appends frames to
@@ -493,7 +494,16 @@ func (b *Base) CreateAudioContext(contextID string) {
 }
 
 // AppendToAudioContext adds a frame to an open context.
+//
+// A provider can take longer than the idle timeout to send any audio, and the
+// drain loop then takes its context as finished. Audio that arrives afterwards
+// for the turn still being spoken opens the context again, queued behind what
+// is already there, rather than being dropped.
 func (b *Base) AppendToAudioContext(contextID string, f frames.Frame) {
+	if contextID != "" && f != nil && !b.AudioContextAvailable(contextID) && contextID == b.turnContextID() {
+		slog.Debug("recreating audio context", "service", b.Name(), "context", contextID)
+		b.CreateAudioContext(contextID)
+	}
 	c := b.audioContextFor(contextID)
 	if c == nil {
 		return
@@ -638,7 +648,7 @@ func (b *Base) AudioContextAvailable(contextID string) bool {
 // It runs on the frame goroutine, which is where the turn's context is owned and
 // where a settings update is handled.
 func (b *Base) RotateTurnContext(ctx context.Context) {
-	current := b.turnContext
+	current := b.turnContextID()
 	if current == "" {
 		// Nothing is being spoken, so the next turn opens its own context with
 		// the new settings already in force.
@@ -651,7 +661,7 @@ func (b *Base) RotateTurnContext(ctx context.Context) {
 			f.FlushAudio(ctx, current)
 		}
 	}
-	b.turnContext = uuid.NewString()
+	b.setTurnContextID(uuid.NewString())
 }
 
 // refreshAudioContext resets a context's idle timeout without emitting
@@ -810,7 +820,7 @@ func (b *Base) handleAudioContext(ctx context.Context, contextID string) bool {
 	// provider actually spoke rather than accepting the request in silence.
 	receivedAudio := false
 	for {
-		it, ok, timedOut := c.get(ctx, stopFrameTimeout)
+		it, ok, timedOut := c.get(ctx, b.stopFrameTimeout)
 		if timedOut {
 			break
 		}
