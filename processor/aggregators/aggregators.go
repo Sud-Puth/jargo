@@ -658,7 +658,7 @@ func (u *UserAggregator) handleFrame(ctx context.Context, f frames.Frame, dir pr
 	}
 
 	switch fr := f.(type) {
-	case *frames.InterimTranscriptionFrame, *frames.TranslationFrame:
+	case *frames.InterimTranscriptionFrame, *frames.TranslationFrame, *frames.EagerTranscriptionFrame:
 		// Consumed here, like the final transcript below: partial speech is not
 		// aggregated either, and the turn strategies that read it run inside this
 		// processor. What is downstream is the model, which is given the
@@ -667,6 +667,10 @@ func (u *UserAggregator) handleFrame(ctx context.Context, f frames.Frame, dir pr
 		// A translation is consumed for the same reason and never aggregated:
 		// only the transcription is the user's own words, so a provider that
 		// reports both must not have the turn counted twice.
+		//
+		// So is the transcript of a predicted end of turn: the strategies that
+		// speculate on it are fed every frame after this, and anything further
+		// down acting on it would act on a turn that may yet be withdrawn.
 		return nil
 
 	case *frames.TranscriptionFrame:
@@ -2200,7 +2204,8 @@ func isUserInput(f frames.Frame) bool {
 		*frames.ProposedUserStartedSpeakingFrame, *frames.ProposedUserStoppedSpeakingFrame,
 		*frames.UserStartedSpeakingFrame, *frames.UserStoppedSpeakingFrame,
 		*frames.InputAudioRawFrame,
-		*frames.InterimTranscriptionFrame, *frames.TranscriptionFrame:
+		*frames.InterimTranscriptionFrame, *frames.TranscriptionFrame,
+		*frames.EagerTranscriptionFrame:
 		return true
 	}
 	return false

@@ -17,10 +17,19 @@ import (
 // settled by another.
 func eagerTurn(t *testing.T, send ...frames.Frame) (*frames.LLMContext, []frames.Frame) {
 	t.Helper()
+	return eagerTurnWith(t, nil, send...)
+}
+
+// eagerTurnWith is eagerTurn with the user muted by the given strategies.
+func eagerTurnWith(
+	t *testing.T, mute []turns.MuteStrategy, send ...frames.Frame,
+) (*frames.LLMContext, []frames.Frame) {
+	t.Helper()
 
 	convo := frames.NewLLMContext("Be brief.")
 	pair := aggregators.New(convo, aggregators.WithTurns(turns.Config{
-		Strategies: turns.EagerStrategies(turns.EagerStrategiesConfig{}),
+		Strategies:     turns.EagerStrategies(turns.EagerStrategiesConfig{}),
+		MuteStrategies: mute,
 	}))
 	task, seen, runDone := runPair(t, pair.User())
 
@@ -236,5 +245,45 @@ func TestWithdrawalPrecedesTheTurnEnd(t *testing.T) {
 	}
 	if turnEnd >= 0 && withdrawal > turnEnd {
 		t.Error("the withdrawal followed the turn end, want it ahead: the reply would already be released")
+	}
+}
+
+// TestEagerTranscriptIsNotPushedDownstream checks the transcript of a predicted
+// end of turn is consumed by the aggregator. It carries text, so anything
+// downstream that speaks or aggregates text must never see it.
+func TestEagerTranscriptIsNotPushedDownstream(t *testing.T) {
+	_, got := eagerTurn(t,
+		frames.NewProposedUserStartedSpeakingFrame(),
+		eagerFrame("book a flight"),
+	)
+	if n := countOf[*frames.EagerTranscriptionFrame](got); n != 0 {
+		t.Errorf("eager transcripts pushed downstream = %d, want none", n)
+	}
+}
+
+// muteAfterTurnStart mutes the user from the frame after the turn starts on, so
+// the turn is under way when the eager transcript arrives.
+type muteAfterTurnStart struct{ started bool }
+
+func (m *muteAfterTurnStart) ShouldMute(f frames.Frame) bool {
+	if _, ok := f.(*frames.ProposedUserStartedSpeakingFrame); ok {
+		m.started = true
+	}
+	return m.started
+}
+
+// TestMutedEagerTranscriptDoesNotSpeculate checks the transcript of a predicted
+// end of turn is user input like any other transcript: while the user is muted
+// it is dropped, and no speculative inference runs on it.
+func TestMutedEagerTranscriptDoesNotSpeculate(t *testing.T) {
+	convo, got := eagerTurnWith(t, []turns.MuteStrategy{&muteAfterTurnStart{}},
+		frames.NewProposedUserStartedSpeakingFrame(),
+		eagerFrame("book a flight"),
+	)
+	if cfs := contextFrames(got); len(cfs) != 0 {
+		t.Errorf("inferences = %d, want none: the eager transcript arrived while muted", len(cfs))
+	}
+	if msgs := convo.Messages(); len(msgs) != 0 {
+		t.Errorf("the conversation holds %v, want nothing", msgs)
 	}
 }
