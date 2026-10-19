@@ -431,6 +431,9 @@ type segment struct {
 	// unit announced before synthesis. The two describe the same segment at
 	// opposite ends of its playback.
 	spoken bool
+	// segmentID is the id of the segment spoken text was spoken in, carried by
+	// the spoken frame, or zero when it names none.
+	segmentID uint64
 }
 
 // botSpeakingMessages maps the bot's audio starting and stopping.
@@ -469,7 +472,7 @@ func (o *Observer) botSpeakingMessages(f frames.Frame) ([]Message, bool) {
 func (o *Observer) outputMessages(f frames.Frame) ([]Message, bool) {
 	switch fr := f.(type) {
 	case *frames.TTSTextFrame:
-		return o.reportSegment(segment{frame: &fr.AggregatedTextFrame, spoken: true}), true
+		return o.reportSegment(segment{frame: &fr.AggregatedTextFrame, spoken: true, segmentID: fr.SegmentID}), true
 	case *frames.AggregatedTextFrame:
 		return o.reportSegment(segment{frame: fr}), true
 	case *frames.AggregatedTextProgressFrame:
@@ -505,9 +508,16 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 	// Rewritten once, so the segment and the caption for it say the same thing.
 	text := o.transform(BotOutputText{Text: agg.Text, AggregatedBy: agg.AggregatedBy}).Text
 
+	// Text the synthesizer spoke for a segment is reported as that segment, so
+	// a client matches its completion to the announcement it already rendered.
+	id := agg.ID()
+	if seg.spoken && seg.segmentID != 0 {
+		id = seg.segmentID
+	}
+
 	var msgs []Message
 	if o.enabled(botOutputOf) && !suppressed {
-		id, spoken, willBeSpoken := agg.ID(), seg.spoken, agg.WillBeSpoken
+		spoken, willBeSpoken := seg.spoken, agg.WillBeSpoken
 		d := BotOutputData{
 			Text:         text,
 			AggregatedBy: agg.AggregatedBy,

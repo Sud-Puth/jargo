@@ -199,6 +199,31 @@ func TestBotOutputReportsSpokenTextAsCompleted(t *testing.T) {
 	}
 }
 
+// A segment spoken in one piece completes as the segment that was announced: a
+// client matches the two by id, and one told about a different id for each
+// would render the sentence twice.
+func TestBotOutputCompletesASegmentSpokenInOnePieceAsThatSegment(t *testing.T) {
+	seg := segment("That sounds fun.", frames.AggregationSentence)
+	spoken := spokenText(seg.Text, frames.AggregationSentence)
+	spoken.SegmentID = seg.ID()
+	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "", speaking(), seg, spoken)
+
+	got := outputs(msgs)
+	if len(got) != 2 {
+		t.Fatalf("got %d bot-output messages, want the announcement and the completion: %v",
+			len(got), types(msgs))
+	}
+	want := []rtvi.SpokenStatus{rtvi.SpokenNew, rtvi.SpokenCompleted}
+	for i, d := range got {
+		if d.SpokenStatus != want[i] {
+			t.Errorf("message %d: status = %q, want %q", i, d.SpokenStatus, want[i])
+		}
+		if d.SegmentID == nil || *d.SegmentID != seg.ID() {
+			t.Errorf("message %d names segment %v, want %d", i, d.SegmentID, seg.ID())
+		}
+	}
+}
+
 // A unit nothing is going to speak has no playback to be anywhere in, so it
 // carries no status and no progress.
 func TestBotOutputSaysNothingAboutPlaybackForUnspokenText(t *testing.T) {

@@ -65,6 +65,10 @@ func NewLLMTextFrame(text string) *LLMTextFrame {
 // highlight within it.
 type TTSTextFrame struct {
 	AggregatedTextFrame
+	// SegmentID is the ID of the AggregatedTextFrame this text is part of, when
+	// the TTS service built it from one: a word carries the ID of the sentence
+	// or other segment it was spoken in. Zero means it belongs to none.
+	SegmentID uint64
 }
 
 // NewTTSTextFrame builds a TTSTextFrame for the spoken text, aggregated by by

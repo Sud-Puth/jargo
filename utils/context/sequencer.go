@@ -237,7 +237,7 @@ func (s *AggregatedFrameSequencer) routeWord(
 		return true, nil
 	}
 	slog.Warn("sequencer word matched no slot, passing through", "sequencer", s.name, "word", word)
-	return true, []frames.Frame{s.buildWordFrame(word, pts, contextID, "", false, includesInterFrame)}
+	return true, []frames.Frame{s.buildWordFrame(word, pts, contextID, 0, "", false, includesInterFrame)}
 }
 
 // emitWord builds the frames for a word the active slot has taken.
@@ -252,9 +252,11 @@ func (s *AggregatedFrameSequencer) emitWord(
 	slotIFS := includesInterFrame
 	emitContextID := contextID
 	frameText, rawText, suppress := word, "", false
+	var segmentID uint64
 	if active != nil {
 		slotIFS = includesInterFrame || active.includesInterFrame
 		emitContextID = active.contextID
+		segmentID = active.frame.ID()
 	}
 	if active != nil && active.tracker != nil {
 		frameText = ""
@@ -269,7 +271,7 @@ func (s *AggregatedFrameSequencer) emitWord(
 
 	var out []frames.Frame
 	if frameText != "" {
-		out = append(out, s.buildWordFrame(frameText, pts, emitContextID, rawText, suppress, slotIFS))
+		out = append(out, s.buildWordFrame(frameText, pts, emitContextID, segmentID, rawText, suppress, slotIFS))
 	}
 	if active != nil && active.tracker != nil && !suppress {
 		out = append(out, s.buildProgressFrame(active, pts))
@@ -342,8 +344,8 @@ func (s *AggregatedFrameSequencer) forceCompleteLocked(contextID string, lastWor
 				rawRemaining = ""
 			}
 			if remaining != "" {
-				out = append(out, s.buildWordFrame(
-					remaining, lastWordPTS, slot.contextID, rawRemaining, false, slot.includesInterFrame))
+				out = append(out, s.buildWordFrame(remaining, lastWordPTS, slot.contextID,
+					slot.frame.ID(), rawRemaining, false, slot.includesInterFrame))
 				// That frame carries the rest of the text, so the progress view has
 				// to reach the end alongside it.
 				slot.tracker.TakeRemainingAsSpoken()
@@ -424,6 +426,7 @@ func (s *AggregatedFrameSequencer) promote(
 		// No timings are coming, so the whole unit is spoken at once: the frame
 		// stands for the sentence rather than a word within it.
 		wordFrame := frames.NewTTSTextFrame(agg.userFacing, frames.AggregationSentence)
+		wordFrame.SegmentID = frame.ID()
 		wordFrame.RawText = agg.llm
 		wordFrame.ContextID = contextID
 		wordFrame.WillBeSpoken = true
@@ -523,11 +526,13 @@ func (s *AggregatedFrameSequencer) buildProgressFrame(
 	return f
 }
 
-// buildWordFrame builds the frame for one spoken word.
+// buildWordFrame builds the frame for one spoken word. segmentID is the id of
+// the frame the word was spoken in, or zero for a word no slot recognized.
 func (s *AggregatedFrameSequencer) buildWordFrame(
-	text string, pts int64, contextID, rawText string, suppress, includesInterFrame bool,
+	text string, pts int64, contextID string, segmentID uint64, rawText string, suppress, includesInterFrame bool,
 ) *frames.TTSTextFrame {
 	f := frames.NewTTSTextFrame(text, frames.AggregationWord)
+	f.SegmentID = segmentID
 	f.SetPTS(pts)
 	f.ContextID = contextID
 	f.RawText = rawText

@@ -384,6 +384,19 @@ func TestProcessWordBasic(t *testing.T) {
 		}
 	})
 
+	t.Run("the word carries the id of the segment it was spoken in", func(t *testing.T) {
+		seq := newSeq(t, false)
+		segment := spokenFrame("hello")
+		seq.RegisterSpoken(segment, "ctx1", "hello", true, true, false, "")
+		word, ok := seq.ProcessWord("hello", 1, "ctx1", false)[0].(*frames.TTSTextFrame)
+		if !ok {
+			t.Fatal("the first frame is not the word")
+		}
+		if word.SegmentID != segment.ID() {
+			t.Fatalf("segment = %d, want %d", word.SegmentID, segment.ID())
+		}
+	})
+
 	t.Run("the word says whether it belongs in the conversation", func(t *testing.T) {
 		for _, belongs := range []bool{true, false} {
 			seq := seqWithSpoken(t, "hello", "ctx1", belongs)
@@ -570,6 +583,17 @@ func TestProcessWordOverflow(t *testing.T) {
 		}
 	})
 
+	t.Run("each half carries the id of its own segment", func(t *testing.T) {
+		seq := newSeq(t, false)
+		first, second := spokenFrame("abc"), spokenFrame("def")
+		seq.RegisterSpoken(first, "ctx1", "abc", true, true, false, "")
+		seq.RegisterSpoken(second, "ctx1", "def", true, true, false, "")
+		got := wordFrames(seq.ProcessWord("abcdef", 100, "ctx1", false))
+		if len(got) != 2 || got[0].SegmentID != first.ID() || got[1].SegmentID != second.ID() {
+			t.Fatalf("got %+v, want segments %d then %d", got, first.ID(), second.ID())
+		}
+	})
+
 	t.Run("the half that finishes the second unit releases what waited", func(t *testing.T) {
 		seq := twoUnits(t, "abc", "def")
 		skipped := skippedFrame("code")
@@ -652,6 +676,18 @@ func TestForceComplete(t *testing.T) {
 		}
 		if pts, has := got[0].PTS(); !has || pts != 50 {
 			t.Fatalf("emitted at %d (set=%v), want the last word's moment, 50", pts, has)
+		}
+	})
+
+	t.Run("the unspoken remainder carries the segment id", func(t *testing.T) {
+		seq := newSeq(t, false)
+		segment := spokenFrame("hello world")
+		seq.RegisterSpoken(segment, "ctx1", "hello world", true, true, false, "")
+		seq.ProcessWord("hello", 10, "ctx1", false)
+
+		got := wordFrames(seq.ForceComplete("ctx1", 50))
+		if len(got) != 1 || got[0].SegmentID != segment.ID() {
+			t.Fatalf("got %+v, want the remainder of segment %d", got, segment.ID())
 		}
 	})
 
@@ -826,6 +862,22 @@ func TestRegisterSpokenStreaming(t *testing.T) {
 		}
 		if got[0].AggregatedBy != frames.AggregationSentence {
 			t.Fatalf("promoted as %q, want a sentence", got[0].AggregatedBy)
+		}
+	})
+
+	t.Run("a sentence spoken in one piece carries its segment id", func(t *testing.T) {
+		seq := newSeq(t, true)
+		out := seq.RegisterSpoken(
+			frames.NewAggregatedTextFrame("Hi there.", frames.AggregationToken),
+			"ctx1", "Hi there.", true, false, false, "")
+		out = append(out, seq.Finalize("ctx1")...)
+		sentences, words := aggFrames(out), wordFrames(out)
+		if len(sentences) != 1 || len(words) != 1 {
+			t.Fatalf("got %v, want the sentence and its spoken text", texts(out))
+		}
+		if words[0].SegmentID != sentences[0].ID() {
+			t.Fatalf("spoken text names segment %d, want the sentence's, %d",
+				words[0].SegmentID, sentences[0].ID())
 		}
 	})
 
