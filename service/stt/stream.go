@@ -412,6 +412,11 @@ type StreamService struct {
 	// on once the new one is up so the words spoken across the gap are not lost.
 	held [][]byte
 
+	// muted records that an STTMuteFrame asked for the audio to go
+	// untranscribed. The audio arriving while it stands is dropped rather than
+	// sent, so it is neither transcribed nor billed.
+	muted bool
+
 	// settingsMu serializes reading the provider's settings against changing
 	// them. A session is opened from the read loop when one drops, and an update
 	// set applies settings updates to the provider's own store.
@@ -548,6 +553,11 @@ func (s *StreamService) ProcessFrame(ctx context.Context, f frames.Frame, dir pr
 			return s.PushFrame(ctx, f, dir)
 		}
 		s.updateSettings(ctx, fr)
+		return nil
+	case *frames.STTMuteFrame:
+		// Consumed here: the mute is addressed to this service, and nothing
+		// after it has anything to do with it.
+		s.setMuted(fr.Mute)
 		return nil
 	case *frames.VADUserStartedSpeakingFrame:
 		s.mu.Lock()
@@ -811,10 +821,45 @@ func (s *StreamService) Connected() bool {
 	return s.stream != nil
 }
 
-// sendAudio hands a chunk to the provider, unless the service can no longer do
-// its job: one that cannot transcribe anything would drop the chunk anyway, and
-// one that connects on demand would attempt a handshake per chunk to do it.
+// Muted reports whether the service is muted, and so leaves the audio it is
+// given untranscribed.
+func (s *StreamService) Muted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.muted
+}
+
+// setMuted applies an STTMuteFrame.
+func (s *StreamService) setMuted(mute bool) {
+	s.mu.Lock()
+	s.muted = mute
+	s.mu.Unlock()
+	if mute {
+		slog.Debug("stt service muted", "service", s.Name())
+	} else {
+		slog.Debug("stt service unmuted", "service", s.Name())
+	}
+}
+
+// sendAudio hands a chunk to the provider.
+//
+// Audio arriving while the session is being replaced is held, and goes through
+// here again once the new one is up. Otherwise the chunk is dropped while the
+// service is muted, and when it can no longer do its job: one that cannot
+// transcribe anything would drop the chunk anyway, and one that connects on
+// demand would attempt a handshake per chunk to do it.
 func (s *StreamService) sendAudio(audio []byte) {
+	s.mu.Lock()
+	if s.reopening {
+		s.held = append(s.held, audio)
+		s.mu.Unlock()
+		return
+	}
+	muted := s.muted
+	s.mu.Unlock()
+	if muted {
+		return
+	}
 	if !s.Usable() {
 		return
 	}
@@ -917,7 +962,7 @@ func (s *StreamService) reopen(ctx context.Context) {
 	s.mu.Unlock()
 
 	for _, audio := range held {
-		s.send(audio)
+		s.sendAudio(audio)
 	}
 }
 

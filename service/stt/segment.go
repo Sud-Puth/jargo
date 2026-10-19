@@ -2,6 +2,7 @@ package stt
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -75,6 +76,11 @@ type SegmentService struct {
 	// segmentCancel stops the segment task at once, nil when none is running.
 	segmentCancel context.CancelFunc
 	segmentWG     sync.WaitGroup
+
+	// muted records the last STTMuteFrame. It is reported by Muted but does
+	// not stop the buffering: a segment is cut by the VAD, and the speech in it
+	// is transcribed whatever the mute state was while it was gathered.
+	muted bool
 }
 
 // CurrentSettings is the service's current settings, for code outside the
@@ -113,6 +119,13 @@ func NewSegment(name string, tr Transcriber, sampleRate int) *SegmentService {
 		s.tracer.abandon(end)
 	}
 	return s
+}
+
+// Muted reports whether the last STTMuteFrame the service was given muted it.
+func (s *SegmentService) Muted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.muted
 }
 
 // SetTrailingSilence sets how much silence is appended to each segment before it
@@ -214,6 +227,14 @@ func (s *SegmentService) ProcessFrame(ctx context.Context, f frames.Frame, dir p
 		return s.PushFrame(ctx, f, dir)
 	case *frames.STTUpdateSettingsFrame:
 		return s.handleSettings(ctx, fr, dir)
+	case *frames.STTMuteFrame:
+		// Consumed here: the mute is addressed to this service, and nothing
+		// after it has anything to do with it.
+		s.mu.Lock()
+		s.muted = fr.Mute
+		s.mu.Unlock()
+		slog.Debug("stt service mute changed", "service", s.Name(), "muted", fr.Mute)
+		return nil
 	case *frames.InputAudioRawFrame:
 		s.bufferAudio(fr.Audio)
 		return s.PushFrame(ctx, f, dir)
