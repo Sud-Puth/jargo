@@ -110,10 +110,12 @@ func speakAligned(t *testing.T, syn *chunkSynth, after ...frames.Frame) (*Base, 
 	return base, append([]frames.Frame(nil), down...)
 }
 
-// sleepFrame is not sent: it holds the frames queued after it back for d.
+// sleepFrame is not sent: it holds the frames queued after it back for d, and
+// closes release, when set, once it is reached.
 type sleepFrame struct {
 	frames.BaseDataFrame
-	d time.Duration
+	d       time.Duration
+	release chan struct{}
 }
 
 func sleepFor(d time.Duration) *sleepFrame { return &sleepFrame{d: d} }

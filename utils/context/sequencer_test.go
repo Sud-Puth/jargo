@@ -1054,6 +1054,23 @@ func TestClear(t *testing.T) {
 				word.Text, word.ContextID, word.AppendToContext)
 		}
 	})
+
+	t.Run("a kept context survives", func(t *testing.T) {
+		// Uninterruptible speech outlives the interruption, so its words are
+		// still attributed to it as they play, while the other context is gone.
+		seq := newSeq(t, false)
+		seq.RegisterSpoken(spokenFrame("Keep this"), "keep", "Keep this", true, true, false, "")
+		seq.RegisterSpoken(spokenFrame("Drop this"), "drop", "Drop this", true, true, false, "")
+		seq.Clear("keep")
+
+		if out := seq.ProcessWord("Drop", 1, "drop", false); len(out) != 0 {
+			t.Fatalf("got %v, want nothing: that context was cleared", texts(out))
+		}
+		out := seq.ProcessWord("Keep", 2, "keep", false)
+		if words := wordFrames(out); len(words) != 1 || words[0].Text != "Keep" || words[0].ContextID != "keep" {
+			t.Fatalf("got %v, want the kept context's word", texts(out))
+		}
+	})
 }
 
 // assembleContext joins the words the way the conversation does, so a test can

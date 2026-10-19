@@ -62,8 +62,8 @@ func (b *Base) destinationName() string {
 }
 
 // pushTrailingSilence sends the padding that follows an utterance, when the
-// service was asked for any.
-func (b *Base) pushTrailingSilence(ctx context.Context) error {
+// service was asked for any. It is as interruptible as the utterance it pads.
+func (b *Base) pushTrailingSilence(ctx context.Context, interruptible bool) error {
 	o := b.silenceOptions()
 	if !o.Enabled {
 		return nil
@@ -77,7 +77,9 @@ func (b *Base) pushTrailingSilence(ctx context.Context) error {
 	if n <= 0 {
 		return nil
 	}
-	return b.PushFrame(ctx, frames.NewTTSAudioRawFrame(make([]byte, n), rate, 1), processor.Downstream)
+	silence := frames.NewTTSAudioRawFrame(make([]byte, n), rate, 1)
+	silence.SetInterruptible(interruptible)
+	return b.PushFrame(ctx, silence, processor.Downstream)
 }
 
 // stampDestination addresses the frames a service produces to the transport

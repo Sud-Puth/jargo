@@ -29,6 +29,9 @@ func runBase(t *testing.T, base *Base, send ...frames.Frame) []frames.Frame {
 	go func() { runDone <- task.Run(context.Background()) }()
 	for _, f := range send {
 		if sleep, ok := f.(*sleepFrame); ok {
+			if sleep.release != nil {
+				close(sleep.release)
+			}
 			time.Sleep(sleep.d)
 			continue
 		}

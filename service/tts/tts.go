@@ -247,10 +247,17 @@ type Base struct {
 	audioRemainders map[string]audioRemainder
 	serial          *serialQueue
 	ctxCancel       context.CancelFunc
-	// ctxDone is closed when the drain goroutine exits, so a graceful end can
-	// wait for the queue it asked to shut down.
-	ctxDone chan struct{}
-	ctxWG   sync.WaitGroup
+	ctxWG           sync.WaitGroup
+	// audioTornDown records that the queue was torn down rather than drained, so
+	// a graceful end has nothing left to wait for.
+	audioTornDown bool
+	// playingContext is the context the drain goroutine is playing, or "" between
+	// contexts. An interruption cuts it off only when it is interruptible.
+	playingContext string
+	// uninterruptibleLastPTS is when the last word of uninterruptible speech is
+	// spoken. Those words outlive an interruption, so the next words are timed
+	// after them.
+	uninterruptibleLastPTS time.Duration
 	// stopFrameTimeout is how long a context waits for more audio before it is
 	// taken as finished.
 	stopFrameTimeout time.Duration
@@ -920,15 +927,11 @@ func (b *Base) handleInterruption(ctx context.Context) {
 			i.HandleInterruption()
 		}
 	}
-	if b.sequencer != nil {
-		b.sequencer.Clear()
-	}
-	b.setTurnContextID("")
-	b.audioCtxMu.Lock()
-	b.wordLastPTS = 0
-	b.audioCtxMu.Unlock()
+	// Interruptible contexts are dropped, along with their place in the
+	// sequencer and the turn they were spoken on. Uninterruptible speech carries
+	// on, and the drain goroutine is restarted only if it was stopped.
 	b.interruptAudioContexts(ctx)
-	b.startAudioContexts(ctx)
+	b.createAudioContextTask(ctx)
 	// The frame goroutine may be paused here: an interruption arriving while an
 	// uninterruptible frame was being handled flushes the queue but leaves the
 	// goroutine in place, and no BotStoppedSpeakingFrame is coming for audio that
@@ -961,14 +964,27 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	// own to drop; whatever the interrupted turn had sent is put back after.
 	savedSentNonWhitespace := b.sentNonWhitespace()
 	b.setSentNonWhitespace(false)
-	b.setTurnContextID(b.createContextID())
+	// The turn's context is cleared first, so the utterance gets a fresh id
+	// rather than the one the turn around it is spoken on.
+	b.setTurnContextID("")
+	speakContextID := b.createContextID()
+	// Recorded before the id becomes the turn's, so an interruption arriving
+	// while uninterruptible speech is being synthesized already finds it
+	// uninterruptible and leaves it in place.
+	interruptible := frames.Interruptible(fr)
+	b.setTTSContext(speakContextID, ttsContext{
+		appendToContext:          appendToContext,
+		pushAssistantAggregation: pushAssistantAggregation,
+		interruptible:            interruptible,
+	})
+	b.setTurnContextID(speakContextID)
 	if c, ok := b.syn.(TurnContextCreator); ok {
-		c.OnTurnContextCreated(ctx, b.turnContextID())
+		c.OnTurnContextCreated(ctx, speakContextID)
 	}
 	// A fixed utterance was never aggregated, so it stands as one sentence and
 	// the text is its own written form.
 	spoken := ttstext.Aggregation{Text: fr.Text, Type: frames.AggregationSentence}
-	if err := b.pushTTSFrames(ctx, spoken, appendToContext, pushAssistantAggregation); err != nil {
+	if err := b.pushTTSFrames(ctx, spoken, interruptible); err != nil {
 		return err
 	}
 	// Streaming tokens, the utterance is held as a pending sentence with no
@@ -976,6 +992,9 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	// never spoken into the context.
 	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContextID()), b.turnContextID())
 	b.onTurnContextCompleted(ctx)
+	if !b.AudioContextAvailable(speakContextID) {
+		b.deleteTTSContext(speakContextID)
+	}
 	// Text went to the provider, so pause for the audio it will produce.
 	b.maybePauseFrameProcessing()
 	b.setTurnContextID(saved)
@@ -1018,7 +1037,7 @@ func (b *Base) aggregate(ctx context.Context, text string) error {
 			// was waiting for. Later ones find it already stopped.
 			b.stopTextAggregationMetrics(ctx)
 		}
-		if err := b.pushTTSFrames(ctx, agg, true, false); err != nil {
+		if err := b.pushTTSFrames(ctx, agg, true); err != nil {
 			return err
 		}
 	}
@@ -1037,7 +1056,7 @@ func (b *Base) flush(ctx context.Context) error {
 	if !ok || strings.TrimSpace(rest.Text) == "" {
 		return nil
 	}
-	return b.pushTTSFrames(ctx, rest, true, false)
+	return b.pushTTSFrames(ctx, rest, true)
 }
 
 // setLLMResponding records whether a model response is driving the speech.
@@ -1083,15 +1102,17 @@ func (b *Base) wordPath() bool {
 // more than one place that builds one, the base's own and a provider's, and
 // every one of them passes through here.
 func (b *Base) PushFrame(ctx context.Context, f frames.Frame, dir processor.Direction) error {
+	b.applyContextInterruptible(f)
 	if stopped, ok := f.(*frames.TTSStoppedFrame); ok {
+		interruptible := frames.Interruptible(stopped)
 		if stopped.ContextID != "" {
-			if err := b.maybeCloseAssistantTurn(ctx, stopped.ContextID); err != nil {
+			if err := b.maybeCloseAssistantTurn(ctx, stopped.ContextID, interruptible); err != nil {
 				return err
 			}
 		}
 		// Ahead of the stop frame, so the padding is part of the utterance
 		// rather than something arriving after it has been called finished.
-		if err := b.pushTrailingSilence(ctx); err != nil {
+		if err := b.pushTrailingSilence(ctx, interruptible); err != nil {
 			return err
 		}
 	}
@@ -1101,13 +1122,15 @@ func (b *Base) PushFrame(ctx context.Context, f frames.Frame, dir processor.Dire
 
 // maybeCloseAssistantTurn tells the aggregator to commit, for a context that
 // asked for it when it was opened. The answer is taken rather than read, so the
-// turn is closed once however many stop frames the context produces.
-func (b *Base) maybeCloseAssistantTurn(ctx context.Context, contextID string) error {
+// turn is closed once however many stop frames the context produces. The commit
+// is as interruptible as the speech it closes.
+func (b *Base) maybeCloseAssistantTurn(ctx context.Context, contextID string, interruptible bool) error {
 	c, known := b.takeTTSContext(contextID)
 	if !known || !c.pushAssistantAggregation {
 		return nil
 	}
 	push := frames.NewLLMAssistantPushAggregationFrame()
+	push.Base().SetInterruptible(interruptible)
 	// The words of this utterance travel the transport's clock queue, which
 	// holds each until its moment. A frame with no timing of its own takes the
 	// other queue and would overtake them, closing the turn before the last
@@ -1183,18 +1206,16 @@ func (b *Base) prepareText(text string) string {
 // pushTTSFrames synthesizes one piece of text on the turn's audio context,
 // opening the context if this is the turn's first sentence. original is the
 // pre-filter text; the configured filters produce the text sent to the provider.
-// appendToContext says whether what is spoken here belongs in the conversation;
-// it is recorded on the context and stamped onto every frame emitted from it.
-// pushAssistantAggregation says whether the assistant turn has to be closed
-// once it has been said.
+// interruptible says whether an interruption may discard this speech. What the
+// context carries (see ttsContext) is recorded for it the first time, unless a
+// TTSSpeakFrame recorded it already, and is stamped onto every frame emitted
+// from it.
 //
 // The audio does not go downstream from here. It is appended to the context and
 // pushed by the context's drain loop, so a provider whose audio arrives later on
 // its own receive loop and one that returns it inline reach the pipeline the
 // same way, in the order the audio was generated.
-func (b *Base) pushTTSFrames(
-	ctx context.Context, agg ttstext.Aggregation, appendToContext, pushAssistantAggregation bool,
-) error {
+func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, interruptible bool) error {
 	original := agg.Text
 	streaming := b.isStreamingTokens()
 
@@ -1244,6 +1265,11 @@ func (b *Base) pushTTSFrames(
 	// cut short. A unit that is never spoken is the other case, and keeps the
 	// default, since nothing later will put it there.
 	aggregated.AppendToContext = false
+	if !interruptible {
+		// Queued for serialization before its context exists, so it carries the
+		// mark itself to survive an interruption.
+		aggregated.SetInterruptible(false)
+	}
 
 	opening := !b.AudioContextAvailable(contextID)
 	if opening {
@@ -1266,10 +1292,8 @@ func (b *Base) pushTTSFrames(
 
 	// Recorded before the context opens, so the drain loop has the answers in
 	// hand by the time the first frame of the context reaches it.
-	b.setTTSContext(contextID, ttsContext{
-		appendToContext:          appendToContext,
-		pushAssistantAggregation: pushAssistantAggregation,
-	})
+	tc := b.ttsContextOrDefault(contextID, ttsContext{appendToContext: true, interruptible: interruptible})
+	appendToContext := tc.appendToContext
 
 	if opening {
 		b.CreateAudioContext(contextID)

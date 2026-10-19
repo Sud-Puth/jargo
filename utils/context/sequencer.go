@@ -2,6 +2,8 @@ package context
 
 import (
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/gojargo/jargo/frames"
@@ -356,15 +358,18 @@ func (s *AggregatedFrameSequencer) forceCompleteLocked(contextID string, lastWor
 	return out
 }
 
-// Clear drops every slot and all context state, for an interruption.
-func (s *AggregatedFrameSequencer) Clear() {
+// Clear drops the slots and context state, for an interruption, except those of
+// keepContexts: synthesis contexts that survive the interruption, whose words
+// are still to be attributed as they play.
+func (s *AggregatedFrameSequencer) Clear(keepContexts ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.slots = nil
-	s.contextAppend = map[string]bool{}
-	s.buffered = nil
-	s.streaming = map[string]*streamingContext{}
+	keep := func(contextID string) bool { return slices.Contains(keepContexts, contextID) }
+	s.slots = slices.DeleteFunc(s.slots, func(slot *aggregatedFrameSlot) bool { return !keep(slot.contextID) })
+	maps.DeleteFunc(s.contextAppend, func(contextID string, _ bool) bool { return !keep(contextID) })
+	s.buffered = slices.DeleteFunc(s.buffered, func(w bufferedWord) bool { return !keep(w.contextID) })
+	maps.DeleteFunc(s.streaming, func(contextID string, _ *streamingContext) bool { return !keep(contextID) })
 }
 
 // appendSpokenSlot adds a registered spoken slot.

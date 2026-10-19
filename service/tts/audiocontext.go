@@ -276,8 +276,14 @@ func (c *audioContext) get(ctx context.Context, timeout time.Duration) (it ctxIt
 // processed.
 type serialItem struct {
 	contextID string
-	frame     frames.Frame
-	end       bool
+	// uninterruptible marks a context an interruption does not drop while it
+	// waits to play.
+	uninterruptible bool
+	frame           frames.Frame
+	end             bool
+	// reached is closed when the drain goroutine reaches the sentinel, or when
+	// the queue is torn down before it could.
+	reached chan struct{}
 }
 
 // serialQueue is an unbounded FIFO of serialization items. Unbounded because its
@@ -303,19 +309,37 @@ func (q *serialQueue) push(it serialItem) {
 	}
 }
 
-// reset drops everything queued, for an interruption, except the
-// uninterruptible frames (a FunctionCallResultFrame, say), which must not be
-// lost mid-flight. Audio contexts and the shutdown sentinel are dropped.
+// reset drops everything queued, for an interruption, except what is
+// uninterruptible: frames such as a FunctionCallResultFrame, which must not be
+// lost mid-flight, and the contexts of uninterruptible speech. The shutdown
+// sentinel is kept too: it is what a graceful end, itself uninterruptible, is
+// waiting on.
 func (q *serialQueue) reset() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	kept := q.items[:0:0]
 	for _, it := range q.items {
-		if it.frame != nil && !frames.Interruptible(it.frame) {
+		switch {
+		case it.end,
+			it.frame != nil && !frames.Interruptible(it.frame),
+			it.contextID != "" && it.uninterruptible:
 			kept = append(kept, it)
 		}
 	}
 	q.items = kept
+}
+
+// releaseEnds drops the shutdown sentinels still queued and releases whoever is
+// waiting on them, for a queue torn down before they were reached.
+func (q *serialQueue) releaseEnds() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items = slices.DeleteFunc(q.items, func(it serialItem) bool {
+		if it.end && it.reached != nil {
+			close(it.reached)
+		}
+		return it.end
+	})
 }
 
 func (q *serialQueue) get(ctx context.Context) (serialItem, bool) {
@@ -339,27 +363,43 @@ func (q *serialQueue) get(ctx context.Context) (serialItem, bool) {
 // startAudioContexts brings up the drain goroutine and the context registry.
 func (b *Base) startAudioContexts(ctx context.Context) {
 	b.stopAudioContexts()
-	done := make(chan struct{})
 	b.audioCtxMu.Lock()
 	b.audioContexts = map[string]*audioContext{}
 	b.ttsContexts = map[string]ttsContext{}
 	b.audioRemainders = map[string]audioRemainder{}
 	b.serial = newSerialQueue()
-	b.ctxDone = done
+	b.playingContext = ""
+	b.audioTornDown = false
 	b.audioCtxMu.Unlock()
+	b.createAudioContextTask(ctx)
+}
+
+// createAudioContextTask starts the drain goroutine if it is not running. The
+// serialization queue is kept: an interruption restarts the goroutine without
+// losing the uninterruptible contexts and frames still queued on it.
+func (b *Base) createAudioContextTask(ctx context.Context) {
+	if b.ctxCancel != nil {
+		return
+	}
 	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	b.ctxCancel = cancel
 	b.ctxWG.Add(1)
-	go b.audioContextLoop(loopCtx, done)
+	go b.audioContextLoop(loopCtx)
 }
 
 // stopAudioContexts tears the drain goroutine down and waits for it. What was
-// queued is dropped, which is what an interruption or a cancel wants; a graceful
-// end goes through drainAudioContexts instead.
+// queued is dropped, which is what a cancel wants; a graceful end goes through
+// drainAudioContexts instead, and is released here if it was still waiting.
 func (b *Base) stopAudioContexts() {
 	if b.stopAudioContextLoop() {
 		b.abandonOpenAudioContexts()
 	}
+	b.audioCtxMu.Lock()
+	b.audioTornDown = true
+	if b.serial != nil {
+		b.serial.releaseEnds()
+	}
+	b.audioCtxMu.Unlock()
 }
 
 // stopAudioContextLoop cancels the drain goroutine and waits for it, leaving the
@@ -376,25 +416,79 @@ func (b *Base) stopAudioContextLoop() bool {
 	return true
 }
 
-// interruptAudioContexts drops every open context for an interruption. The
-// provider is told about each one while it is still registered, so a hook that
-// looks the context up still finds it, and only then is the context removed.
-// The one being played is among them: the drain loop leaves it in place when it
-// is cut off.
+// interruptAudioContexts drops the interruptible contexts for an interruption,
+// while the synthesis and playback of uninterruptible speech carry on.
+//
+// The drain goroutine is stopped only when what it is playing can be cut off;
+// otherwise it goes on playing it. Either way the queue behind it loses
+// everything interruptible. The provider is told about each context dropped
+// while it is still registered, so a hook that looks the context up still finds
+// it, and only then is the context removed. The one being played is among them
+// when it was cut off: the drain loop leaves it in place.
 func (b *Base) interruptAudioContexts(ctx context.Context) {
-	b.stopAudioContextLoop()
+	preserved := b.uninterruptibleContexts()
+	interruptPlaying := !slices.Contains(preserved, b.playingContextID())
+	if interruptPlaying {
+		b.stopAudioContextLoop()
+		// The next words are timed after the uninterruptible ones still to play.
+		b.audioCtxMu.Lock()
+		b.wordLastPTS = b.uninterruptibleLastPTS
+		b.audioCtxMu.Unlock()
+	}
+
 	b.audioCtxMu.Lock()
 	if b.serial != nil {
 		b.serial.reset()
 	}
 	b.audioCtxMu.Unlock()
+	b.sequencer.Clear(preserved...)
+
 	interrupter, _ := b.syn.(AudioContextInterrupter)
 	for _, id := range b.openAudioContexts() {
+		if slices.Contains(preserved, id) {
+			continue
+		}
 		if interrupter != nil {
 			interrupter.OnAudioContextInterrupted(ctx, id)
 		}
 		b.removeInterruptedAudioContext(id)
 	}
+
+	if interruptPlaying {
+		b.setPlayingContextID("")
+	}
+	if !slices.Contains(preserved, b.turnContextID()) {
+		b.setTurnContextID("")
+	}
+}
+
+// uninterruptibleContexts lists the synthesis contexts an interruption leaves
+// in place.
+func (b *Base) uninterruptibleContexts() []string {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	var out []string
+	for id, c := range b.ttsContexts {
+		if !c.interruptible {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// playingContextID is the context the drain goroutine is playing, or "" when it
+// is between contexts.
+func (b *Base) playingContextID() string {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	return b.playingContext
+}
+
+// setPlayingContextID records the context the drain goroutine is playing.
+func (b *Base) setPlayingContextID(id string) {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	b.playingContext = id
 }
 
 // removeInterruptedAudioContext forgets a context an interruption dropped and
@@ -448,16 +542,19 @@ func (b *Base) traceSettings() map[string]any {
 //
 // It is what an EndFrame waits on: the frame that stops the pipeline must not
 // overtake the speech it was queued behind. An interruption arriving meanwhile
-// tears the loop down, and the wait ends with it.
+// drops what is interruptible and may restart the loop; the sentinel survives
+// it, so the wait goes on until the loop running then has reached it too, behind
+// the uninterruptible speech still to play.
 func (b *Base) drainAudioContexts() {
 	b.audioCtxMu.Lock()
-	serial, done := b.serial, b.ctxDone
-	b.audioCtxMu.Unlock()
-	if serial == nil || done == nil {
+	if b.serial == nil || b.audioTornDown {
+		b.audioCtxMu.Unlock()
 		return
 	}
-	serial.push(serialItem{end: true})
-	<-done
+	reached := make(chan struct{})
+	b.serial.push(serialItem{end: true, reached: reached})
+	b.audioCtxMu.Unlock()
+	<-reached
 }
 
 // CreateAudioContext opens a context and queues it for playback behind whatever
@@ -487,9 +584,13 @@ func (b *Base) CreateAudioContext(contextID string) {
 	}
 	b.audioContexts[contextID] = c
 	serial := b.serial
+	// Uninterruptible speech keeps its place in the queue through an
+	// interruption. A context nothing was recorded for is interruptible.
+	tc, known := b.ttsContexts[contextID]
+	uninterruptible := known && !tc.interruptible
 	b.audioCtxMu.Unlock()
 	if serial != nil {
-		serial.push(serialItem{contextID: contextID})
+		serial.push(serialItem{contextID: contextID, uninterruptible: uninterruptible})
 	}
 }
 
@@ -508,6 +609,10 @@ func (b *Base) AppendToAudioContext(contextID string, f frames.Frame) {
 	if c == nil {
 		return
 	}
+	// A frame on a context belongs to it. Providers often leave the id unset,
+	// and it is what marks the frame as part of uninterruptible speech when it is
+	// pushed.
+	stampContextID(f, contextID)
 	switch fr := f.(type) {
 	case *frames.TTSAudioRawFrame:
 		if !b.alignAudioFrame(contextID, fr) {
@@ -682,6 +787,11 @@ type ttsContext struct {
 	// utterance the service says on its own, which has no model response around
 	// it to close the assistant turn.
 	pushAssistantAggregation bool
+	// interruptible reports whether an interruption may discard this synthesis.
+	// Uninterruptible speech goes on being synthesized and played through one,
+	// and every frame it produces is marked uninterruptible so the transport
+	// keeps it too.
+	interruptible bool
 }
 
 // setTTSContext records what a context carries.
@@ -692,6 +802,89 @@ func (b *Base) setTTSContext(contextID string, c ttsContext) {
 		b.ttsContexts = map[string]ttsContext{}
 	}
 	b.ttsContexts[contextID] = c
+}
+
+// ttsContextOrDefault returns what a context carries, recording def for it
+// first when nothing was. A TTSSpeakFrame records its context before its text
+// gets here; the sentences of a model response take the default.
+func (b *Base) ttsContextOrDefault(contextID string, def ttsContext) ttsContext {
+	b.audioCtxMu.Lock()
+	defer b.audioCtxMu.Unlock()
+	if b.ttsContexts == nil {
+		b.ttsContexts = map[string]ttsContext{}
+	}
+	if c, ok := b.ttsContexts[contextID]; ok {
+		return c
+	}
+	b.ttsContexts[contextID] = def
+	return def
+}
+
+// applyContextInterruptible makes a frame of an uninterruptible context
+// uninterruptible too, and notes when the last uninterruptible word is spoken.
+func (b *Base) applyContextInterruptible(f frames.Frame) {
+	if id := frameContextID(f); id != "" {
+		b.audioCtxMu.Lock()
+		c, ok := b.ttsContexts[id]
+		b.audioCtxMu.Unlock()
+		if ok && !c.interruptible {
+			f.Base().SetInterruptible(false)
+		}
+	}
+	if _, word := f.(*frames.TTSTextFrame); word && !frames.Interruptible(f) {
+		if pts, has := f.Base().PTS(); has && pts != 0 {
+			b.audioCtxMu.Lock()
+			b.uninterruptibleLastPTS = time.Duration(pts)
+			b.audioCtxMu.Unlock()
+		}
+	}
+}
+
+// frameContextID is the synthesis context a frame names, or "" for a frame
+// that names none.
+func frameContextID(f frames.Frame) string {
+	switch fr := f.(type) {
+	case *frames.TTSAudioRawFrame:
+		return fr.ContextID
+	case *frames.TTSStartedFrame:
+		return fr.ContextID
+	case *frames.TTSStoppedFrame:
+		return fr.ContextID
+	case *frames.TTSTextFrame:
+		return fr.ContextID
+	case *frames.AggregatedTextFrame:
+		return fr.ContextID
+	case *frames.AggregatedTextProgressFrame:
+		return fr.ContextID
+	}
+	return ""
+}
+
+// stampContextID names the context on a frame that belongs to it, when the
+// frame does not name one already.
+func stampContextID(f frames.Frame, contextID string) {
+	switch fr := f.(type) {
+	case *frames.TTSAudioRawFrame:
+		if fr.ContextID == "" {
+			fr.ContextID = contextID
+		}
+	case *frames.TTSStartedFrame:
+		if fr.ContextID == "" {
+			fr.ContextID = contextID
+		}
+	case *frames.TTSStoppedFrame:
+		if fr.ContextID == "" {
+			fr.ContextID = contextID
+		}
+	case *frames.TTSTextFrame:
+		if fr.ContextID == "" {
+			fr.ContextID = contextID
+		}
+	case *frames.AggregatedTextFrame:
+		if fr.ContextID == "" {
+			fr.ContextID = contextID
+		}
+	}
 }
 
 // appendsToContext reports what setTTSContext recorded for a context. A context
@@ -766,10 +959,9 @@ func (b *Base) deleteAudioContext(contextID string) {
 // audioContextLoop drains the serialization queue, preserving downstream frame
 // order: a context is played out in full before whatever was queued behind it.
 // It runs until the queue is torn down or the shutdown sentinel is reached,
-// closing done on its way out so a graceful end knows the queue has drained.
-func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
+// which it reports so a graceful end knows the queue has drained.
+func (b *Base) audioContextLoop(ctx context.Context) {
 	defer b.ctxWG.Done()
-	defer close(done)
 	b.audioCtxMu.Lock()
 	serial := b.serial
 	b.audioCtxMu.Unlock()
@@ -783,6 +975,9 @@ func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
 		}
 		if it.end {
 			// Everything queued ahead of the sentinel has been processed.
+			if it.reached != nil {
+				close(it.reached)
+			}
 			return
 		}
 		if it.frame != nil {
@@ -790,9 +985,11 @@ func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
 			_ = b.PushFrame(ctx, it.frame, processor.Downstream)
 			continue
 		}
-		if it.contextID == "" {
+		// A context an interruption removed before it played is skipped.
+		if it.contextID == "" || !b.AudioContextAvailable(it.contextID) {
 			continue
 		}
+		b.setPlayingContextID(it.contextID)
 		if !b.handleAudioContext(ctx, it.contextID) {
 			// Cut off mid-play: the context stays registered so whoever stopped
 			// the loop can report it interrupted rather than completed.
@@ -803,6 +1000,7 @@ func (b *Base) audioContextLoop(ctx context.Context, done chan struct{}) {
 		if c, ok := b.syn.(AudioContextCompleter); ok {
 			c.OnAudioContextCompleted(ctx, it.contextID)
 		}
+		b.setPlayingContextID("")
 	}
 }
 
