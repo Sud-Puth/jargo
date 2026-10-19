@@ -380,6 +380,104 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- **Uninterruptible speech survives an interruption in the TTS service.** A
+  `TTSSpeakFrame` marked uninterruptible now gets its own audio context, even
+  in the middle of a model reply, and an interruption keeps it: only
+  interruptible contexts are dropped and reported to the provider, the
+  serialization queue keeps the frames of the contexts it keeps, and the words
+  of the next reply are timed after the uninterruptible words still to play.
+  Before, the interruption reset the queue and lost them.
+
+- **Audio arriving after its context timed out is played.** A provider slower
+  than the 3 s audio context timeout had the rest of its sentence dropped. The
+  turn's context is now opened again for audio that still belongs to it.
+
+- **Word timestamps no longer lose trailing text.** With word timestamps on, a
+  reply ending without punctuation and a whole `TTSSpeakFrame` produced no text
+  frame, so that text never reached the conversation or the transcript.
+
+- **Speech-to-text honors `STTMuteFrame`.** The streaming services stop
+  sending audio while muted, so muted audio is no longer transcribed or billed,
+  and the frame is consumed. Segmented services still transcribe while muted,
+  as before.
+
+- **User audio is handled wherever input audio is.** `UserAudioRawFrame` was
+  skipped by speech-to-text, the input filter, voice activity detection, the
+  end-of-turn analyzer, the user mute, the audio buffer, the RTVI audio level
+  and the speech-to-speech services, because they matched the plain input
+  audio type only. They now match the new `frames.InputAudioFrame` interface,
+  and transcripts carry the user's ID.
+
+- **The speech-to-text TTFB is reset when the user starts speaking and on an
+  interruption.** A later transcript was measured from an earlier end of
+  speech, inflating the metric.
+
+- **An interruption cannot miss a function call dispatched just before it.** A
+  parallel call was tracked only once its goroutine started, so an
+  interruption in that gap left it running and its result started an inference
+  for a turn the user had abandoned. `OnFunctionCallsCanceled` now fires once
+  per function name, and a call whose function was unregistered after it was
+  queued gets the missing-function answer.
+
+- **The user aggregator mutes and consumes `EagerTranscriptionFrame`.** It was
+  passed on, and seen while muted, causing stray speculative inferences.
+
+- **An observer can remove itself from its own callback.** It deadlocked.
+
+- **An urgent DTMF keypress no longer writes over a chunk the audio loop is
+  writing.** The two writes raced in the serializer's resampler. Writes to one
+  destination now take turns.
+
+- **`FilterEnableFrame` reaches the input filter.** Only the settings frame
+  did. With no filter configured, a filter control frame is passed downstream
+  instead of being dropped.
+
+- **The telephony auto hang-up is bounded and finishes before the run ends.**
+  The Twilio, Telnyx and Plivo hang-up requests ran on a detached goroutine
+  with no timeout, so a hung provider API leaked one per call. The request now
+  runs as the ending frame is serialized, bounded by `wsserver.HangUpTimeout`
+  (5 minutes), and each provider's "call already ended" answer is recognized.
+  A hung API can therefore delay a session's shutdown by up to that long.
+
+- **LiveKit works at any sample rate.** Room audio is resampled to the input
+  rate, and output is framed at the output rate and encoded to 48 kHz, as
+  WebRTC already does.
+
+- **RTVI keeps the words and progress of a skipped segment from the client.**
+  They leaked private text. Spoken text is now reported under the segment it
+  was spoken in (`TTSTextFrame.SegmentID`), so clients no longer show a
+  sentence twice, and an intermediate function call result no longer reports
+  the call as stopped.
+
+- **Gemini accepts any tool result and tools from MCP servers.** A `null` or
+  other non-object result is wrapped as `{"value": ...}` instead of being
+  rejected, and tool schemas are adapted: `additionalProperties` and `x-*`
+  keys are dropped, a union `type` becomes `anyOf`, and non-string `enum`
+  values are dropped, with one warning per adaptation.
+
+- **Anthropic caches the system instruction.** With caching on, the service or
+  call instruction goes out with a cache breakpoint. Its TTL is set with
+  `anthropic.Config.SystemPromptCacheTTL` (`5m` or `1h`).
+
+- **The Smart Turn session is released.** Every pipeline using the default
+  stop strategies leaked one native ONNX session per call. Cleaning up the
+  strategy now cleans up its analyzer, which opens the session again if it is
+  used after that. **Breaking:** `turn.Analyzer.Close()` is now
+  `Cleanup() error`.
+
+- **No turn metric without a prediction.** The silence safety net emitted a
+  "complete, probability 0" metric although the model never ran. Metrics are
+  now reported only for a prediction the model made, and are labeled
+  `BaseSmartTurn`. **Breaking:** `AnalyzeEndOfTurn` also returns a
+  `*turn.MetricsData`.
+
+- **The loudness meter no longer allocates per frame.** It produced about
+  176 KB of garbage per 32 ms frame. It now measures integrated loudness the
+  way the reference meter does, with no allocation, so volume readings shift
+  slightly onto that scale. **Breaking:** `loudness.NewMeter(rate)` replaces
+  `NewMeter(rate, blockSize)`, and `AddPCM` and `LoudnessGlobal` replace
+  `IntegratedLoudness`.
+
 - **A panic in a processor no longer takes the process down.** A panic while
   a processor handles or pushes a frame is recovered and reported upstream as
   an `ErrorFrame` wrapping `processor.ErrPanic`, with the stack logged, and the
