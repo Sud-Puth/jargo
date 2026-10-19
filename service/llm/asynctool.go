@@ -431,32 +431,15 @@ func (b *Base) CancelAsyncToolCall(ctx context.Context, toolCallID string) error
 // rather than a barge-in, so a tool that survives an interruption is canceled
 // here too: that is the whole point of the tool.
 func (b *Base) cancelFunctionCallByID(ctx context.Context, toolCallID string) bool {
-	b.callsMu.Lock()
-	call, running := b.calls[toolCallID]
-	if running {
-		// Settled before canceling, so a handler that catches its cancellation
-		// and reports a result while unwinding cannot reopen a call the pipeline
-		// has stopped tracking.
-		call.settled = true
-		delete(b.calls, toolCallID)
-	}
-	b.callsMu.Unlock()
-	if !running {
+	// The result of the tool that asked for this cancellation runs inference
+	// already, so asking again here would answer twice.
+	canceled := b.cancelFunctionCallTasks(ctx, func(call *functionCall) bool {
+		return call.toolCallID == toolCallID
+	}, "user request", false)
+	if len(canceled) == 0 {
 		slog.DebugContext(ctx, "asked to cancel a call that is not running",
 			"service", b.Name(), "tool_call_id", toolCallID)
 		return false
 	}
-
-	slog.DebugContext(ctx, "canceling async function call by model request",
-		"service", b.Name(), "function", call.name, "tool_call_id", call.toolCallID)
-	call.cancel()
-	// The result of the tool that asked for this cancellation runs inference
-	// already, so asking again here would answer twice.
-	b.broadcastFunctionCallCanceled(ctx, call, false)
-
-	b.eventsMu.RLock()
-	h := b.onCanceled
-	b.eventsMu.RUnlock()
-	b.notify(ctx, h, []frames.ToolCall{{ID: call.toolCallID, Name: call.name, Args: call.args}})
 	return true
 }

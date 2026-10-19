@@ -198,6 +198,9 @@ type registryItem struct {
 	// cleanup is the resource this tool works through, released at teardown. See
 	// ToolCleanup.
 	cleanup ToolCleanup
+	// missing marks the entry built for a call nothing claims, which answers it
+	// with the missing-function handler.
+	missing bool
 }
 
 // WithToolCleanup names the resource this tool works through, so the service
@@ -305,6 +308,9 @@ func WithFunctionCallFilter(f FunctionCallFilter) Option {
 
 // functionCall is one call in flight, tracked so it can be canceled.
 type functionCall struct {
+	// item is the registration the call was dispatched under. Which calls an
+	// interruption or a cancel tool stops is decided from it; the handler that
+	// runs is looked up again when the call starts. See runFunctionCall.
 	item       registryItem
 	name       string
 	toolCallID string
@@ -312,6 +318,10 @@ type functionCall struct {
 	convo      *frames.LLMContext
 	groupID    string
 
+	// ctx is the lifetime the handler runs under, and cancel ends it. Both are
+	// set when the call starts being tracked, which can be before its goroutine
+	// runs: a call canceled by then never runs at all.
+	ctx    context.Context
 	cancel context.CancelFunc
 	// settled reports that the call is over: it has reported a final result,
 	// timed out, or been canceled. It stops the result callback from reporting
@@ -589,6 +599,9 @@ func (b *Base) runSequentially() {
 		case <-b.callsCtx.Done():
 			return
 		case call := <-b.sequential:
+			// Tracked only once the runner takes it, so a call still queued is
+			// not one an interruption finds in flight.
+			b.trackFunctionCall(call)
 			b.runFunctionCall(call)
 		}
 	}
@@ -1040,10 +1053,15 @@ func (b *Base) lookupFunction(name string) (registryItem, bool) {
 	if !ok {
 		return registryItem{}, false
 	}
-	// The catch-all is registered under the empty name; a call runs under the
-	// name the model actually used.
-	item.name = name
+	// The catch-all keeps the empty name it is registered under, so an
+	// interruption matches its calls to it. A call runs under the name the model
+	// actually used, which the call carries itself.
 	return item, true
+}
+
+// missingFunctionItem builds the entry that answers a call nothing claims.
+func missingFunctionItem(name string) registryItem {
+	return registryItem{name: name, handler: missingFunctionHandler, cancelOnInterruption: true, missing: true}
 }
 
 // logMissingFunction says why a call had no handler, telling apart the two cases
@@ -1171,7 +1189,7 @@ func (b *Base) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.D
 		}
 		return b.run(ctx, fr.Context)
 	case *frames.InterruptionFrame:
-		b.cancelFunctionCalls(ctx)
+		b.handleInterruptions(ctx)
 		return b.PushFrame(ctx, f, dir)
 	case *frames.EagerEndOfTurnCancelFrame:
 		b.handleEagerEndOfTurnCancel(ctx)
@@ -1491,7 +1509,7 @@ func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, c
 			// Nothing claims it, so say which of the two ways that happened before
 			// the missing-function handler answers the model.
 			b.logMissingFunction(ctx, c.Name, convo)
-			item = registryItem{name: c.Name, handler: missingFunctionHandler, cancelOnInterruption: true}
+			item = missingFunctionItem(c.Name)
 		}
 		call := &functionCall{
 			item:       item,
@@ -1502,6 +1520,10 @@ func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, c
 			groupID:    groupID,
 		}
 		if b.runInParallel {
+			// Tracked before its goroutine is started, so an interruption handled
+			// right after this returns finds the call and cancels it, even if the
+			// goroutine has not run yet.
+			b.trackFunctionCall(call)
 			b.callsWG.Go(func() { b.runFunctionCall(call) })
 			continue
 		}
@@ -1514,21 +1536,23 @@ func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, c
 	}
 }
 
-// runFunctionCall executes one tool call: it announces the call as in progress,
-// which is what writes it and the message answering it to the conversation, then
-// dispatches it to its handler.
-//
-// The call runs under a context of its own, derived from the session's rather
-// than the turn's, so that whether it survives an interruption is decided by how
-// it was registered and not by the turn ending.
-func (b *Base) runFunctionCall(call *functionCall) {
-	ctx, cancel := context.WithCancel(b.callsCtx)
-	defer cancel()
-
+// trackFunctionCall records a call as in flight and opens the lifetime its
+// handler runs under, derived from the session's rather than the turn's, so that
+// whether it survives an interruption is decided by how it was registered and
+// not by the turn ending.
+func (b *Base) trackFunctionCall(call *functionCall) {
+	call.ctx, call.cancel = context.WithCancel(b.callsCtx)
 	b.callsMu.Lock()
-	call.cancel = cancel
 	b.calls[call.toolCallID] = call
 	b.callsMu.Unlock()
+}
+
+// runFunctionCall executes one tracked tool call: it announces the call as in
+// progress, which is what writes it and the message answering it to the
+// conversation, then dispatches it to its handler.
+func (b *Base) runFunctionCall(call *functionCall) {
+	ctx := call.ctx
+	defer call.cancel()
 	defer func() {
 		b.callsMu.Lock()
 		// Only if it is still this call: a cancellation may already have dropped
@@ -1538,20 +1562,27 @@ func (b *Base) runFunctionCall(call *functionCall) {
 		}
 		b.callsMu.Unlock()
 	}()
+	if ctx.Err() != nil {
+		// Canceled before it started: whatever canceled it has settled it, and
+		// its handler never runs.
+		return
+	}
+
+	item := b.resolveFunctionCall(ctx, call)
 
 	slog.DebugContext(ctx, "calling function", "service", b.Name(),
 		"function", call.name, "tool_call_id", call.toolCallID)
 
 	if err := b.Broadcast(ctx, func() frames.Frame {
 		return frames.NewFunctionCallInProgressFrame(
-			call.toolCallID, call.name, call.args, call.item.cancelOnInterruption, call.groupID,
+			call.toolCallID, call.name, call.args, item.cancelOnInterruption, call.groupID,
 		)
 	}); err != nil {
 		return
 	}
 
-	report := b.resultCallback(call)
-	stopTimeout := b.startCallTimeout(ctx, call)
+	report := b.resultCallback(call, item)
+	stopTimeout := b.startCallTimeout(ctx, call, item)
 	defer stopTimeout()
 	b.callsMu.Lock()
 	call.stopTimeout = stopTimeout
@@ -1565,7 +1596,7 @@ func (b *Base) runFunctionCall(call *functionCall) {
 		Context:      call.convo,
 		Result:       report,
 	}
-	if err := call.item.handler(ctx, params); err != nil {
+	if err := item.handler(ctx, params); err != nil {
 		// The failure came from the application's own handler, so it says nothing
 		// about whether this service can go on doing its job.
 		b.PushError(ctx, fmt.Sprintf("error executing function call [%s]: %v", call.name, err), err, false,
@@ -1575,8 +1606,25 @@ func (b *Base) runFunctionCall(call *functionCall) {
 		// arrive otherwise. What it is told names the function and nothing else.
 		// The error itself reaches the user through the model, and it carries
 		// whatever the handler put in it.
-		_ = b.settleCall(ctx, call, fmt.Sprintf(functionCallErrorTemplate, call.name), err.Error(), nil)
+		_ = b.settleCall(ctx, call, item, fmt.Sprintf(functionCallErrorTemplate, call.name), err.Error(), nil)
 	}
+}
+
+// resolveFunctionCall looks the handler of a call up again as it starts. The
+// function may have been unregistered since the call was dispatched, a tool set
+// swapped by an earlier call of the same response for instance. The call then
+// falls back to the missing-function handler, so it still ends with an ordinary
+// tool result.
+func (b *Base) resolveFunctionCall(ctx context.Context, call *functionCall) registryItem {
+	if item, ok := b.lookupFunction(call.name); ok {
+		return item
+	}
+	if call.item.missing {
+		return call.item
+	}
+	slog.WarnContext(ctx, "function was unregistered between being queued and running",
+		"service", b.Name(), "function", call.name, "tool_call_id", call.toolCallID)
+	return missingFunctionItem(call.name)
 }
 
 // functionCallErrorTemplate is returned to the model as the tool result when a
@@ -1591,8 +1639,8 @@ const functionCallErrorTemplate = "The function `%s` failed and returned no resu
 // cancel-aware handler can run its cleanup.
 //
 // It returns a no-op when no bound applies, so a call with none costs nothing.
-func (b *Base) startCallTimeout(ctx context.Context, call *functionCall) func() {
-	timeout := call.item.timeout
+func (b *Base) startCallTimeout(ctx context.Context, call *functionCall, item registryItem) func() {
+	timeout := item.timeout
 	if timeout == 0 {
 		timeout = b.callTimeout
 	}
@@ -1657,21 +1705,22 @@ func (b *Base) broadcastFunctionCallCanceled(
 // resultCallback builds the callback the handler reports through. It is bound to
 // the call rather than to a turn, so a result reports against the call that
 // produced it however much has happened since.
-func (b *Base) resultCallback(call *functionCall) FunctionCallResultCallback {
+func (b *Base) resultCallback(call *functionCall, item registryItem) FunctionCallResultCallback {
 	return func(ctx context.Context, result string, props *frames.FunctionCallResultProperties) error {
-		return b.settleCall(ctx, call, result, "", props)
+		return b.settleCall(ctx, call, item, result, "", props)
 	}
 }
 
 // settleCall reports a result against a call. failure is what went wrong on a
 // call whose handler failed, and "" on one that returned: it travels on the
 // frame beside the result so a failed call is legible as one, where the result
-// itself only ever names the function.
+// itself only ever names the function. item is the registration the call runs
+// under.
 func (b *Base) settleCall(
-	ctx context.Context, call *functionCall, result, failure string,
+	ctx context.Context, call *functionCall, item registryItem, result, failure string,
 	props *frames.FunctionCallResultProperties,
 ) error {
-	if !props.Final() && call.item.cancelOnInterruption {
+	if !props.Final() && item.cancelOnInterruption {
 		slog.WarnContext(ctx, "intermediate result from a tool that is not asynchronous",
 			"service", b.Name(), "function", call.name, "tool_call_id", call.toolCallID)
 		return nil
@@ -1707,15 +1756,39 @@ func (b *Base) settleCall(
 	})
 }
 
-// cancelFunctionCalls cancels every call in flight that was registered to be
-// canceled on interruption, and announces each one so the conversation records
-// it as canceled rather than as still running. A call registered to survive an
-// interruption is left to finish.
-func (b *Base) cancelFunctionCalls(ctx context.Context) {
+// handleInterruptions cancels the calls in flight of every function registered
+// to be canceled on interruption. A call registered to survive an interruption
+// is left to finish. The user is talking, so a canceled call must not answer
+// over them, and no inference is asked for.
+func (b *Base) handleInterruptions(ctx context.Context) {
+	b.handlersMu.RLock()
+	var names []string
+	for name, item := range b.handlers {
+		if item.cancelOnInterruption {
+			names = append(names, name)
+		}
+	}
+	b.handlersMu.RUnlock()
+	slices.Sort(names)
+	for _, name := range names {
+		b.cancelFunctionCallTasks(ctx, func(call *functionCall) bool {
+			return call.item.name == name
+		}, "interruption", false)
+	}
+}
+
+// cancelFunctionCallTasks cancels the calls in flight that match, and returns
+// them. Each handler's context is canceled so a cancel-aware handler runs its
+// cleanup, a FunctionCallCancelFrame is broadcast so the rest of the pipeline
+// settles the call, and OnFunctionCallsCanceled is told. runLLM says whether
+// inference should run once the canceled calls are settled in the conversation.
+func (b *Base) cancelFunctionCallTasks(
+	ctx context.Context, match func(*functionCall) bool, reason string, runLLM bool,
+) []frames.ToolCall {
 	b.callsMu.Lock()
 	var canceled []*functionCall
 	for id, call := range b.calls {
-		if !call.item.cancelOnInterruption {
+		if !match(call) {
 			continue
 		}
 		// Settled before canceling, so a handler that catches its cancellation
@@ -1726,21 +1799,24 @@ func (b *Base) cancelFunctionCalls(ctx context.Context) {
 		canceled = append(canceled, call)
 	}
 	b.callsMu.Unlock()
+	slices.SortFunc(canceled, func(x, y *functionCall) int {
+		return strings.Compare(x.toolCallID, y.toolCallID)
+	})
 
-	dropped := make([]frames.ToolCall, 0, len(canceled))
+	items := make([]frames.ToolCall, 0, len(canceled))
 	for _, call := range canceled {
 		slog.DebugContext(ctx, "canceling function call", "service", b.Name(),
-			"function", call.name, "tool_call_id", call.toolCallID)
+			"function", call.name, "tool_call_id", call.toolCallID, "reason", reason)
 		call.cancel()
-		// The user is talking, so a canceled call must not answer over them.
-		b.broadcastFunctionCallCanceled(ctx, call, false)
-		dropped = append(dropped, frames.ToolCall{ID: call.toolCallID, Name: call.name, Args: call.args})
+		b.broadcastFunctionCallCanceled(ctx, call, runLLM)
+		items = append(items, frames.ToolCall{ID: call.toolCallID, Name: call.name, Args: call.args})
 	}
 
 	b.eventsMu.RLock()
 	h := b.onCanceled
 	b.eventsMu.RUnlock()
-	b.notify(ctx, h, dropped)
+	b.notify(ctx, h, items)
+	return items
 }
 
 // CanGenerateMetrics reports that this service times inference and reports
