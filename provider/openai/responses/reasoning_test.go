@@ -115,11 +115,18 @@ func TestReasoningInExtraReplacesTheDefault(t *testing.T) {
 
 // recorder records the thinking defaults reported to it.
 type recorder struct {
-	lines []string
+	lines           []string
+	providerDefault bool
 }
+
+func (r *recorder) UseProviderThinkingDefault() bool { return r.providerDefault }
 
 func (r *recorder) ReportThinkingDefault(model, setting string, canThink bool, _, _ string) {
 	switch {
+	case r.providerDefault:
+		if canThink {
+			r.lines = append(r.lines, "DEBUG "+model)
+		}
 	case setting != "":
 		r.lines = append(r.lines, "INFO "+model+" "+setting)
 	case canThink:
@@ -251,5 +258,32 @@ func TestReasoningEncoding(t *testing.T) {
 	}
 	if _, present := plainBody["reasoning"]; present {
 		t.Errorf("a non-reasoning model carries a reasoning field: %s", plain)
+	}
+}
+
+// TestUseProviderThinkingDefaultRunsAtOpenAIsDefault checks the setting sends no
+// default, and that the base is told the model runs at OpenAI's default.
+func TestUseProviderThinkingDefaultRunsAtOpenAIsDefault(t *testing.T) {
+	r := recorder{providerDefault: true}
+	var req request
+	Config{Model: "gpt-5.5"}.applyThinkingDefault(&req, &r)
+
+	if req.Reasoning != nil {
+		t.Errorf("sent reasoning %+v, want none", req.Reasoning)
+	}
+	if want := []string{"DEBUG gpt-5.5"}; !slices.Equal(r.lines, want) {
+		t.Errorf("reported %q, want %q", r.lines, want)
+	}
+}
+
+// TestUseProviderThinkingDefaultOnAModelThatDoesNotReasonLogsNothing checks a
+// model without reasoning has no default to skip.
+func TestUseProviderThinkingDefaultOnAModelThatDoesNotReasonLogsNothing(t *testing.T) {
+	r := recorder{providerDefault: true}
+	var req request
+	Config{Model: "gpt-4.1"}.applyThinkingDefault(&req, &r)
+
+	if len(r.lines) != 0 {
+		t.Errorf("reported %q, want nothing", r.lines)
 	}
 }

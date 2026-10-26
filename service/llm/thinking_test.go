@@ -68,3 +68,32 @@ func TestAModelThatCanThinkWithoutADefaultIsWarnedAbout(t *testing.T) {
 		t.Errorf("line = %s, want a warning about thinker", got[0])
 	}
 }
+
+// TestUseProviderThinkingDefaultIsReportedAtDebug checks a model left to its
+// provider's default on purpose is reported once, at DEBUG, and a model that
+// cannot think is not reported at all.
+func TestUseProviderThinkingDefaultIsReportedAtDebug(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	svc := llm.New("FakeLLM", &fakeGen{})
+	if svc.UseProviderThinkingDefault() {
+		t.Fatal("use_provider_thinking_default is on before anything set it")
+	}
+	svc.SetUseProviderThinkingDefault(true)
+
+	svc.ReportThinkingDefault("thinker", "", true, "P", "Thinking in p.Config")
+	svc.ReportThinkingDefault("thinker", "", true, "P", "Thinking in p.Config")
+	svc.ReportThinkingDefault("plain", "", false, "P", "Thinking in p.Config")
+
+	got := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(got) != 1 {
+		t.Fatalf("logged %d lines, want 1:\n%s", len(got), buf.String())
+	}
+	if !strings.Contains(got[0], "level=DEBUG") ||
+		!strings.Contains(got[0], "use_provider_thinking_default is set") ||
+		!strings.Contains(got[0], "model=thinker") {
+		t.Errorf("line = %s, want thinker reported at DEBUG", got[0])
+	}
+}

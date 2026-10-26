@@ -195,16 +195,17 @@ func extraConfiguresThinking(extra map[string]any) bool {
 //
 // It applies the model's entry in thinkingDefaults, if it has one. A request
 // that already sets thinking or an effort, from the config or from Extra, is
-// left as it is, since the two together decide how much the model thinks. The
-// first request for each model logs the setting sent or, for a Claude model
-// that is not listed, warns that it runs at Anthropic's default.
+// left as it is, since the two together decide how much the model thinks. So is
+// every request when UseProviderThinkingDefault is set. The first request for
+// each model logs the setting sent, or that the model runs at Anthropic's
+// default, warning for an unlisted Claude model.
 func (s *Service) applyThinkingDefault(params *sdk.MessageNewParams) {
 	if s.thinkingSet || s.effort != "" || s.extraConfiguresThinking {
 		return
 	}
 	name := modelName(s.model)
 	var setting string
-	if d, ok := thinkingDefaults[name]; ok {
+	if d, ok := thinkingDefaults[name]; ok && !s.UseProviderThinkingDefault() {
 		switch {
 		case d.effort != "":
 			params.OutputConfig.Effort = sdk.OutputConfigEffort(d.effort)

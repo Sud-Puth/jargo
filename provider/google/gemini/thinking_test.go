@@ -681,3 +681,27 @@ func TestChunksWithoutAFinishReasonAreQuiet(t *testing.T) {
 		t.Errorf("logs = %q, want nothing said for chunks that carry no reason", logged())
 	}
 }
+
+// TestUseProviderThinkingDefaultRunsAtGooglesDefault checks the setting sends
+// no default and logs the reason once, at DEBUG.
+func TestUseProviderThinkingDefaultRunsAtGooglesDefault(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	s := NewLLM(Config{APIKey: "k", Model: "gemini-3.6-flash"})
+	s.SetUseProviderThinkingDefault(true)
+
+	g := s.genConfig()
+	s.genConfig()
+
+	if _, ok := g[keyThinkingConfig]; ok {
+		t.Errorf("sent %v, want no thinking config", g[keyThinkingConfig])
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=DEBUG") ||
+		!strings.Contains(lines[0], "use_provider_thinking_default is set") ||
+		!strings.Contains(lines[0], "model=gemini-3.6-flash") {
+		t.Errorf("logged %q, want one DEBUG line saying why", lines)
+	}
+}

@@ -212,6 +212,12 @@ type LLM struct {
 	// whether the user had finished speaking. It is set by the turn strategy that
 	// drives the protocol rather than by an application directly.
 	FilterIncompleteUserTurns Opt[bool] `settings:"filter_incomplete_user_turns"`
+	// UseProviderThinkingDefault reports whether a model with no thinking
+	// configured runs at its provider's default. Services that otherwise send
+	// each model its lowest thinking setting, for the fastest responses, send
+	// none. A backend worker sets it on its LLM, which does the reasoning its
+	// frontend hands off. Unset means false.
+	UseProviderThinkingDefault Opt[bool] `settings:"use_provider_thinking_default"`
 	// UserTurnCompletionConfig configures that gating: the protocol taught to the
 	// model, the waits before re-prompting, and the re-prompts themselves. It is
 	// set by the same turn strategy.

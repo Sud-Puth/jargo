@@ -238,6 +238,9 @@ func modelSupportsReasoning(model string) (reasons, known bool) {
 // LLM base implements it.
 type ThinkingReporter interface {
 	ReportThinkingDefault(model, setting string, canThink bool, provider, settings string)
+	// UseProviderThinkingDefault reports whether a model with no thinking
+	// configured runs at the provider's default, so no default is sent.
+	UseProviderThinkingDefault() bool
 }
 
 // configuredReasoning is the reasoning the config asks for, or nil when it
@@ -255,10 +258,11 @@ func (c Config) configuredReasoning() *ReasoningConfig {
 //
 // It applies the model's entry in thinkingDefaults, if it has one, for the
 // fastest responses; any other model runs at OpenAI's default. A request that
-// already sets reasoning, from the config or from Extra, is left as it is. The
-// first request for each model reports the effort sent or, for a reasoning
-// model that is not listed, warns that it runs at OpenAI's default. report may
-// be nil, which reports nothing.
+// already sets reasoning, from the config or from Extra, is left as it is, and so
+// is every one when the reporter's UseProviderThinkingDefault is set. The first
+// request for each model reports the effort sent, or that the model runs at
+// OpenAI's default, warning for an unlisted reasoning model. report may be nil,
+// which reports nothing.
 func (c Config) applyThinkingDefault(req *request, report ThinkingReporter) {
 	if req.Reasoning != nil {
 		return
@@ -266,8 +270,9 @@ func (c Config) applyThinkingDefault(req *request, report ThinkingReporter) {
 	if _, ok := c.Extra["reasoning"]; ok {
 		return
 	}
+	providerDefault := report != nil && report.UseProviderThinkingDefault()
 	var setting string
-	if effort, ok := thinkingDefaults[modelName(c.Model)]; ok {
+	if effort, ok := thinkingDefaults[modelName(c.Model)]; ok && !providerDefault {
 		req.Reasoning = &ReasoningConfig{Effort: effort}
 		setting = fmt.Sprintf(`reasoning={"effort":%q}`, effort)
 	}

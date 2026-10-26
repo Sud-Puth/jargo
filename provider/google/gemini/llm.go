@@ -272,16 +272,16 @@ func ThinkingParams(t *ThinkingConfig) map[string]any {
 //
 // It applies the model's entry in thinkingDefaults, if it has one. A generation
 // config that already sets thinkingConfig, from the config or from Extra, is
-// left as it is. The first request for each model logs the setting sent or, for
-// a model that can think but is not listed, warns that it runs at Google's
-// default.
+// left as it is, and so is every one when UseProviderThinkingDefault is set. The
+// first request for each model logs the setting sent, or that the model runs at
+// Google's default, warning for an unlisted model that can think.
 func (s *Service) applyThinkingDefault(g map[string]any) {
 	if _, set := g[keyThinkingConfig]; set {
 		return
 	}
 	name := modelName(s.cfg.Model)
 	var setting string
-	if d, ok := thinkingDefaults[name]; ok {
+	if d, ok := thinkingDefaults[name]; ok && !s.UseProviderThinkingDefault() {
 		thinking := maps.Clone(d)
 		g[keyThinkingConfig] = thinking
 		setting = keyThinkingConfig + "=" + thinkingSetting(thinking)

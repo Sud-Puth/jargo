@@ -127,13 +127,18 @@ func NewAgentLLM(cfg AgentConfig) *responses.HTTPService {
 // configured.
 //
 // A request that already sets reasoning or a preset, from the config or from
-// Extra, is left as it is. The first request for each model logs the preset
-// sent.
+// Extra, is left as it is, and so is every one when the reporter's
+// UseProviderThinkingDefault is set. The first request for each model logs the
+// preset sent, or that the model runs at Perplexity's default.
 func (c AgentConfig) applyThinkingDefault(body map[string]any, model string, report responses.ThinkingReporter) {
 	if _, ok := body["reasoning"]; ok {
 		return
 	}
 	if _, ok := body["preset"]; ok || c.Preset != "" {
+		return
+	}
+	if report.UseProviderThinkingDefault() {
+		report.ReportThinkingDefault(model, "", true, "Perplexity", "Preset or Reasoning in perplexity.AgentConfig")
 		return
 	}
 	body["preset"] = fastPreset

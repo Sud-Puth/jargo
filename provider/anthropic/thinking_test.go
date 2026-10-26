@@ -413,3 +413,34 @@ func TestConfigAcceptsBetweenTools(t *testing.T) {
 		t.Errorf("thinking = %v, want between_tools", got)
 	}
 }
+
+// --- use_provider_thinking_default ---
+
+// TestUseProviderThinkingDefaultRunsAtAnthropicsDefault checks the setting
+// sends no default and logs the reason once, at DEBUG.
+func TestUseProviderThinkingDefaultRunsAtAnthropicsDefault(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&syncWriter{w: &buf}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	s := NewLLM(Config{Model: "claude-opus-5-5"})
+	s.SetUseProviderThinkingDefault(true)
+
+	params := paramsOf(t, s)
+	paramsOf(t, s)
+
+	if got := thinkingFields(params); len(got) != 0 {
+		t.Errorf("sent %v, want no thinking default", got)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(line, "thinking") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=DEBUG") ||
+		!strings.Contains(lines[0], "use_provider_thinking_default is set") ||
+		!strings.Contains(lines[0], "model=claude-opus-5-5") {
+		t.Errorf("logged %q, want one DEBUG line saying why", lines)
+	}
+}
