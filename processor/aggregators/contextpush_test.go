@@ -300,3 +300,36 @@ func TestAppendsQueuedTogetherRunInferenceOnce(t *testing.T) {
 		t.Errorf("conversation holds %d messages, want 3", got)
 	}
 }
+
+// TestOnlyASynchronousCallHoldsTheModel checks an asynchronous call in flight,
+// which has its placeholder in the context, does not count as synchronous,
+// while a synchronous one, and one announced but not yet started, do.
+func TestOnlyASynchronousCallHoldsTheModel(t *testing.T) {
+	cases := []struct {
+		name string
+		feed []frames.Frame
+		want bool
+	}{
+		{"asynchronous", []frames.Frame{
+			frames.NewFunctionCallInProgressFrame("1", "lookup", nil, false, "g1"),
+		}, false},
+		{"synchronous", []frames.Frame{
+			frames.NewFunctionCallInProgressFrame("1", "lookup", nil, true, "g1"),
+		}, true},
+		{"announced", []frames.Frame{
+			frames.NewFunctionCallsStartedFrame([]frames.ToolCall{{ID: "1", Name: "lookup"}}),
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAssistantHarness(t, frames.NewLLMContext(""))
+			h.task.QueueFrames(tc.feed)
+			if !waitFor(3*time.Second, h.assistant.HasFunctionCallsInProgress) {
+				t.Fatal("the call never reached the aggregator")
+			}
+			if got := h.assistant.HasSynchronousFunctionCallsInProgress(); got != tc.want {
+				t.Errorf("synchronous call in progress = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}

@@ -1220,6 +1220,24 @@ func (a *AssistantAggregator) HasFunctionCallsInProgress() bool {
 	return len(a.inProgress) > 0
 }
 
+// HasSynchronousFunctionCallsInProgress reports whether a synchronous call is
+// in flight, one whose result the model waits for.
+//
+// A synchronous call leaves the context without its result until it returns,
+// so the model cannot run in the meantime; an asynchronous one (registered with
+// CancelOnInterruption false) has a placeholder result in the context and the
+// model runs on. A call announced but not yet started counts as synchronous.
+func (a *AssistantAggregator) HasSynchronousFunctionCallsInProgress() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, started := range a.inProgress {
+		if started == nil || started.CancelOnInterruption {
+			return true
+		}
+	}
+	return false
+}
+
 // Setup opens the lifetime the context-updated callbacks run under.
 func (a *AssistantAggregator) Setup(ctx context.Context, s processor.Setup) error {
 	if err := a.Base.Setup(ctx, s); err != nil {
