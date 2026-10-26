@@ -412,3 +412,39 @@ func TestOnSignalRunsForAnEventCarryingNothing(t *testing.T) {
 		t.Error("the handler never ran")
 	}
 }
+
+// TestCleanupFromAHandlerReturns checks that cleaning up from one of the
+// registry's own asynchronous handlers returns rather than waiting for itself,
+// so an object cleaned up from its own event handler does not hang, and that
+// the handlers queued behind it still run.
+func TestCleanupFromAHandlerReturns(t *testing.T) {
+	var s Registry
+	s.Register("on_thing", false)
+	returned := make(chan struct{})
+	ran := make(chan struct{}, 1)
+	first := true
+	s.Add("on_thing", func(ctx context.Context, _ any, _ ...any) {
+		if first {
+			first = false
+			s.Cleanup(ctx)
+			close(returned)
+			return
+		}
+		ran <- struct{}{}
+	})
+
+	s.Call(t.Context(), "on_thing", &s)
+	s.Call(t.Context(), "on_thing", &s)
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("Cleanup called from a handler never returned")
+	}
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("the handler queued behind it never ran")
+	}
+	s.Cleanup(t.Context())
+}

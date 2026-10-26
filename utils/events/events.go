@@ -37,6 +37,9 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
+
+	"github.com/gojargo/jargo/internal/goid"
 )
 
 // Handler is called when the event it is attached to fires. source is the
@@ -95,6 +98,9 @@ type Registry struct {
 	// idle is closed once the queue has drained, and exists only while
 	// something is waiting for that.
 	idle chan struct{}
+	// dispatcher is the number of the goroutine running the queued handlers,
+	// zero when none is, so a Cleanup called from a handler is recognized.
+	dispatcher atomic.Uint64
 }
 
 // call is one handler waiting to be run, with everything the firing carried.
@@ -247,6 +253,8 @@ func (r *Registry) Call(ctx context.Context, name string, source any, args ...an
 // dispatch runs the queued handlers one at a time until the queue is empty, and
 // then returns. The next Call starts it again.
 func (r *Registry) dispatch() {
+	r.dispatcher.Store(goid.Current())
+	defer r.dispatcher.Store(0)
 	for {
 		r.mu.Lock()
 		if len(r.queue) == 0 {
@@ -281,8 +289,13 @@ func (r *Registry) signalIdleLocked() {
 // running. Call it when the object raising the events is done with, so a handler
 // is not left running past the thing it was observing.
 //
-// Do not call it from a handler: it would be waiting for itself.
+// Called from one of those handlers, it returns at once rather than wait for
+// itself: the handlers run one at a time on the goroutine calling it, so none of
+// them could finish while it waited.
 func (r *Registry) Cleanup(ctx context.Context) {
+	if id := r.dispatcher.Load(); id != 0 && id == goid.Current() {
+		return
+	}
 	r.mu.Lock()
 	if len(r.queue) == 0 && r.inFlight == 0 {
 		r.mu.Unlock()
