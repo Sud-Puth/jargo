@@ -1,6 +1,7 @@
 package observers
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -99,11 +100,24 @@ func (o *TurnTracking) OnPushFrame(data processor.FramePushed) {
 			o.scheduleEnd(data.Timestamp)
 		}
 	case *frames.EndFrame, *frames.CancelFrame:
+		o.cancelTimer()
 		if o.active {
-			o.cancelTimer()
 			o.endTurn(data.Timestamp, true)
 		}
 	}
+}
+
+// Cleanup cancels the pending turn-end timer. It implements
+// processor.CleanupObserver.
+//
+// The pipeline can be torn down before this observer receives its EndFrame or
+// CancelFrame, and the timer would then fire on a finished pipeline, ending a
+// turn after the run, while its callback keeps the pipeline in memory.
+func (o *TurnTracking) Cleanup(context.Context) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cancelTimer()
+	return nil
 }
 
 // userStarted advances the turn state when the user starts speaking, ending the
@@ -173,5 +187,8 @@ func (o *TurnTracking) cancelTimer() {
 	}
 }
 
-// Compile-time interface check.
-var _ processor.Observer = (*TurnTracking)(nil)
+// Compile-time interface checks.
+var (
+	_ processor.Observer        = (*TurnTracking)(nil)
+	_ processor.CleanupObserver = (*TurnTracking)(nil)
+)

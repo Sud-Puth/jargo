@@ -1,6 +1,9 @@
 package pipeline
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -139,6 +142,22 @@ func (p *observerProxy) stop() {
 	for _, w := range workers {
 		w.finish()
 	}
+	for _, w := range workers {
+		cleanupObserver(w.observer)
+	}
+}
+
+// cleanupObserver lets an observer release what it holds, once nothing reports
+// to it any more. Tearing down is best effort: an observer that fails is logged
+// and the rest are still cleaned up.
+func cleanupObserver(o processor.Observer) {
+	c, ok := o.(processor.CleanupObserver)
+	if !ok {
+		return
+	}
+	if err := c.Cleanup(context.Background()); err != nil {
+		slog.Error("cleaning up an observer failed", "observer", fmt.Sprintf("%T", o), "err", err)
+	}
 }
 
 // add registers another observer while the pipeline runs, starting its goroutine
@@ -185,9 +204,12 @@ func (p *observerProxy) remove(o processor.Observer) {
 	}
 	if found.onWorkerGoroutine() {
 		found.stop()
-		return
+	} else {
+		found.cancel()
 	}
-	found.cancel()
+	// The pipeline cleans up only the observers still registered when it stops,
+	// so a removed one is cleaned up here.
+	cleanupObserver(o)
 }
 
 // pipelineStarted reports the pipeline having started to every observer. It goes

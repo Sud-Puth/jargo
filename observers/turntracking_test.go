@@ -249,3 +249,25 @@ func TestTurnTrackingEndsATimedOutTurnWhenTheBotFellSilent(t *testing.T) {
 		t.Errorf("turn duration = %s, want 2s: the wait for more speech is not part of the turn", got)
 	}
 }
+
+// TestTurnTrackingCleanupCancelsThePendingTurnEnd covers a pipeline torn down
+// before the observer received its EndFrame or CancelFrame. Cleanup is the last
+// chance to cancel the turn-end timer, which would otherwise end a turn after
+// the run.
+func TestTurnTrackingCleanupCancelsThePendingTurnEnd(t *testing.T) {
+	r := newTurnRecorder()
+	o := observers.NewTurnTracking(r.config(turnEndTimeoutTest))
+
+	push(o, frames.NewStartFrame(), processor.Downstream)
+	push(o, frames.NewBotStartedSpeakingFrame(), processor.Upstream)
+	push(o, frames.NewBotStoppedSpeakingFrame(), processor.Upstream)
+
+	if err := o.Cleanup(t.Context()); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	time.Sleep(3 * turnEndTimeoutTest)
+
+	if _, ended := r.snapshot(); len(ended) != 0 {
+		t.Errorf("ended = %+v, want none after cleanup", ended)
+	}
+}

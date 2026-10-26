@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"context"
 	"time"
 
 	"github.com/gojargo/jargo/frames"
@@ -73,6 +74,17 @@ func (d ProcessorSetUp) Duration() time.Duration { return d.FinishedAt.Sub(d.Sta
 type Observer interface {
 	// OnPushFrame reports one frame handed from one processor to the next.
 	OnPushFrame(data FramePushed)
+}
+
+// CleanupObserver is an optional interface an Observer implements to release
+// what it holds once the pipeline no longer reports to it: when it is removed
+// from a running pipeline, and when the pipeline worker stops. Cleaning up is
+// best effort: an error is logged, and the other observers are still cleaned
+// up.
+type CleanupObserver interface {
+	Observer
+	// Cleanup releases what the observer holds.
+	Cleanup(ctx context.Context) error
 }
 
 // EveryPushObserver is an optional interface an Observer implements to say
