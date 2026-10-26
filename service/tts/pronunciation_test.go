@@ -35,8 +35,8 @@ func speak(t *testing.T, supported bool, texts ...string) []string {
 	syn.supported.Store(supported)
 	base := tts.New("PronounceTTS", syn)
 	upper := tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return strings.ToUpper(text), nil
 		},
 	}
@@ -88,7 +88,7 @@ func TestPronunciationsAreSkippedWhenTheProviderCannotReadThem(t *testing.T) {
 func TestAServiceWithoutAFormatterPronouncesNothing(t *testing.T) {
 	base := tts.New("PlainTTS", &spacedSynth{})
 	tr := base.PronunciationTransformIPA(map[string]string{"Metformin": "mɛtˈfɔɹmɪn"})
-	got, err := tr.Transform(context.Background(), "Metformin", frames.AnyAggregation)
+	got, err := tr.Transform(context.Background(), "Metformin", frames.AnyTextType)
 	if err != nil || got != "Metformin" {
 		t.Fatalf("got %q, %v; want the word as written", got, err)
 	}

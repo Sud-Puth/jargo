@@ -14,7 +14,7 @@ import (
 // soon as it completes, so a flush only ever sees one in the corner cases where
 // the scan offset has gone stale.
 func TestPatternPairFlushStepsOverAClosedRun(t *testing.T) {
-	a := NewPatternPairAggregator(frames.AggregationSentence, "")
+	a := NewPatternPairAggregator(frames.TextTypeSentence, "")
 	if err := a.AddPattern("test_pattern", "<test>", "</test>", MatchRemove); err != nil {
 		t.Fatal(err)
 	}

@@ -50,7 +50,7 @@ func (b *Base) setSentNonWhitespace(v bool) {
 // it arrives rather than grouping it into sentences. Per-token aggregation time
 // is not a meaningful measurement, so it is not taken.
 func (b *Base) isStreamingTokens() bool {
-	return b.aggregator != nil && b.aggregator.Type() == frames.AggregationToken
+	return b.aggregator != nil && b.aggregator.Type() == frames.TextTypeToken
 }
 
 // startTextAggregationMetrics starts the clock, unless it is already running.

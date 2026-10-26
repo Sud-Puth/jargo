@@ -168,7 +168,7 @@ func TestVoiceFormatter(t *testing.T) {
 // particular aggregation type.
 func format(t *testing.T, f *VoiceFormatter, text string) string {
 	t.Helper()
-	got, err := f.Transform(t.Context(), text, frames.AnyAggregation)
+	got, err := f.Transform(t.Context(), text, frames.AnyTextType)
 	if err != nil {
 		t.Fatalf("Transform(%q): %v", text, err)
 	}

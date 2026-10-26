@@ -409,7 +409,7 @@ func (s *AggregatedFrameSequencer) promote(
 	if trimSpace(agg.userFacing) == "" {
 		return nil
 	}
-	frame := frames.NewAggregatedTextFrame(agg.userFacing, frames.AggregationSentence)
+	frame := frames.NewAggregatedTextFrame(agg.userFacing, frames.TextTypeSentence)
 	frame.RawText = agg.llm
 	frame.ContextID = contextID
 	frame.WillBeSpoken = true
@@ -425,7 +425,7 @@ func (s *AggregatedFrameSequencer) promote(
 	if !buildTracker {
 		// No timings are coming, so the whole unit is spoken at once: the frame
 		// stands for the sentence rather than a word within it.
-		wordFrame := frames.NewTTSTextFrame(agg.userFacing, frames.AggregationSentence)
+		wordFrame := frames.NewTTSTextFrame(agg.userFacing, frames.TextTypeSentence)
 		wordFrame.SegmentID = frame.ID()
 		wordFrame.RawText = agg.llm
 		wordFrame.ContextID = contextID
@@ -518,7 +518,7 @@ func (s *AggregatedFrameSequencer) buildProgressFrame(
 		slot.frame.ID(),
 		slot.contextID,
 		slot.frame.Text,
-		slot.frame.AggregatedBy,
+		slot.frame.TextType,
 		slot.tracker.AccumulatedUserFacingText(),
 		slot.tracker.RemainingUserFacingText(false),
 	)
@@ -531,7 +531,7 @@ func (s *AggregatedFrameSequencer) buildProgressFrame(
 func (s *AggregatedFrameSequencer) buildWordFrame(
 	text string, pts int64, contextID string, segmentID uint64, rawText string, suppress, includesInterFrame bool,
 ) *frames.TTSTextFrame {
-	f := frames.NewTTSTextFrame(text, frames.AggregationWord)
+	f := frames.NewTTSTextFrame(text, frames.TextTypeWord)
 	f.SegmentID = segmentID
 	f.SetPTS(pts)
 	f.ContextID = contextID

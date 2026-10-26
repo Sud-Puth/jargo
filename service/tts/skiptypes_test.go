@@ -14,7 +14,7 @@ import (
 )
 
 // codeType is the aggregation type the pattern below cuts its units under.
-const codeType = frames.AggregationType("code")
+const codeType = frames.TextType("code")
 
 // runWithSkippedType feeds one turn through a base that cuts <code> blocks out
 // under their own type and is told not to speak them. It returns what the
@@ -23,7 +23,7 @@ const codeType = frames.AggregationType("code")
 func runWithSkippedType(t *testing.T, skip bool, text string) (spoken []string, down []frames.Frame) {
 	t.Helper()
 
-	agg := ttstext.NewPatternPairAggregator(frames.AggregationSentence, "")
+	agg := ttstext.NewPatternPairAggregator(frames.TextTypeSentence, "")
 	if err := agg.AddPattern(codeType, "<code>", "</code>", ttstext.MatchAggregate); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func runWithSkippedType(t *testing.T, skip bool, text string) (spoken []string, 
 	base := tts.New("SkipTTS", syn)
 	base.SetTextAggregator(agg)
 	if skip {
-		base.SetSkipAggregatorTypes(codeType)
+		base.SetSkipTextTypes(codeType)
 	}
 
 	task := pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{
@@ -87,7 +87,7 @@ func TestSkippedAggregationTypeStillReachesTheConversation(t *testing.T) {
 
 	var skipped *frames.AggregatedTextFrame
 	for _, f := range down {
-		if af, ok := f.(*frames.AggregatedTextFrame); ok && af.AggregatedBy == codeType {
+		if af, ok := f.(*frames.AggregatedTextFrame); ok && af.TextType == codeType {
 			skipped = af
 		}
 	}
@@ -126,7 +126,7 @@ func TestUnskippedAggregationTypeIsSynthesized(t *testing.T) {
 // service that times its words emits them through the sequencer, so it is the
 // one that can order a skipped frame against them.
 func TestSkippedAggregationTypeLandsInOrder(t *testing.T) {
-	agg := ttstext.NewPatternPairAggregator(frames.AggregationSentence, "")
+	agg := ttstext.NewPatternPairAggregator(frames.TextTypeSentence, "")
 	if err := agg.AddPattern(codeType, "<code>", "</code>", ttstext.MatchAggregate); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestSkippedAggregationTypeLandsInOrder(t *testing.T) {
 	}}
 	base := tts.New("SkipOrderTTS", syn)
 	base.SetTextAggregator(agg)
-	base.SetSkipAggregatorTypes(codeType)
+	base.SetSkipTextTypes(codeType)
 
 	task := pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{
 		ReachedDownstreamFilter: pipeline.AnyFrame,
@@ -173,7 +173,7 @@ func TestSkippedAggregationTypeLandsInOrder(t *testing.T) {
 		case *frames.TTSTextFrame:
 			lastWord = i
 		case *frames.AggregatedTextFrame:
-			if fr.AggregatedBy == codeType {
+			if fr.TextType == codeType {
 				skipped = i
 			}
 		}

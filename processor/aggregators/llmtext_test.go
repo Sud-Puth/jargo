@@ -38,8 +38,8 @@ func TestLLMTextGroupsTokensIntoSentences(t *testing.T) {
 	if got[0].Text != "Hello, world." {
 		t.Errorf("text = %q, want the completed sentence", got[0].Text)
 	}
-	if got[0].AggregatedBy != frames.AggregationSentence {
-		t.Errorf("aggregated by %q, want %q", got[0].AggregatedBy, frames.AggregationSentence)
+	if got[0].TextType != frames.TextTypeSentence {
+		t.Errorf("aggregated by %q, want %q", got[0].TextType, frames.TextTypeSentence)
 	}
 
 	task.StopWhenDone()
@@ -134,7 +134,7 @@ type clearingSpy struct {
 
 func newClearingSpy(t *testing.T) *clearingSpy {
 	t.Helper()
-	return &clearingSpy{SimpleAggregator: text.NewSimpleAggregator(frames.AggregationSentence, "")}
+	return &clearingSpy{SimpleAggregator: text.NewSimpleAggregator(frames.TextTypeSentence, "")}
 }
 
 func (a *clearingSpy) HandleInterruption() {

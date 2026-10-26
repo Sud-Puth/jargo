@@ -28,7 +28,7 @@ type LLMText struct {
 
 // NewLLMText builds a processor grouping the model's output into sentences.
 func NewLLMText(name string) *LLMText {
-	p := &LLMText{aggregator: text.NewSimpleAggregator(frames.AggregationSentence, "")}
+	p := &LLMText{aggregator: text.NewSimpleAggregator(frames.TextTypeSentence, "")}
 	p.Base = processor.New(name, p)
 	return p
 }

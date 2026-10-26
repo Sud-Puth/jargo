@@ -138,7 +138,7 @@ service finds its boundaries in the language its settings name, English when
 they name none, with rules for some forty languages; a
 `TTSUpdateSettingsFrame` changing the language applies from the next text, and
 keeps what is already buffered. An aggregator built by hand takes its language
-too, as `text.NewSimpleAggregator(frames.AggregationSentence, "de")`.
+too, as `text.NewSimpleAggregator(frames.TextTypeSentence, "de")`.
 
 #### Pronunciations
 

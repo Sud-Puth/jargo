@@ -55,8 +55,8 @@ func TestATransformLeavingOnlyWhitespaceLeavesTheTextUnspoken(t *testing.T) {
 	syn := &fakeSynth{rate: 24000, chunk: []byte{1, 2, 3, 4}, spoken: make(chan string, 8)}
 	base := tts.New("TransformTTS", syn)
 	base.AddTextTransformer(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			if text == "Skip me." {
 				return " ", nil
 			}

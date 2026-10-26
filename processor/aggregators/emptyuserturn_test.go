@@ -112,7 +112,7 @@ func botSpeaking() script {
 		50 * time.Millisecond,
 		frames.NewLLMFullResponseStartFrame(),
 		frames.NewBotStartedSpeakingFrame(),
-		frames.NewTTSTextFrame("Where would", frames.AggregationWord),
+		frames.NewTTSTextFrame("Where would", frames.TextTypeWord),
 		50 * time.Millisecond,
 	}
 }

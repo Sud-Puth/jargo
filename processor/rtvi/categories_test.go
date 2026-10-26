@@ -41,7 +41,7 @@ func sent(msgs []rtvi.Message, msgType string) bool {
 // the pipeline produces: the audio starting is what raises the frame, and the
 // spoken text is released in step with the audio behind it.
 func conversation() []frames.Frame {
-	spoken := frames.NewTTSTextFrame("Hi there.", frames.AggregationSentence)
+	spoken := frames.NewTTSTextFrame("Hi there.", frames.TextTypeSentence)
 	spoken.WillBeSpoken = true
 	return []frames.Frame{
 		frames.NewUserStartedSpeakingFrame(),

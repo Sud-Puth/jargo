@@ -181,7 +181,7 @@ func TestTokenModeTracksTheWholeSentence(t *testing.T) {
 		case *frames.AggregatedTextProgressFrame:
 			progress = append(progress, fr)
 		case *frames.AggregatedTextFrame:
-			if fr.AggregatedBy == frames.AggregationSentence {
+			if fr.TextType == frames.TextTypeSentence {
 				anchors = append(anchors, fr)
 			}
 		}

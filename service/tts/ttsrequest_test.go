@@ -65,8 +65,8 @@ func TestTTSRequestAnnouncesEachUnit(t *testing.T) {
 func TestTTSRequestCarriesWhatTheProviderIsGiven(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return strings.ReplaceAll(text, "@", " at "), nil
 		},
 	})
@@ -91,14 +91,14 @@ func TestTTSRequestCarriesWhatTheProviderIsGiven(t *testing.T) {
 // downstream unsynthesized draws no announcement: nothing was requested of the
 // provider, so there is no request to report.
 func TestTTSRequestIsNotAnnouncedForUnspokenText(t *testing.T) {
-	const codeType frames.AggregationType = "code"
-	agg := ttstext.NewPatternPairAggregator(frames.AggregationSentence, "")
+	const codeType frames.TextType = "code"
+	agg := ttstext.NewPatternPairAggregator(frames.TextTypeSentence, "")
 	if err := agg.AddPattern(codeType, "<code>", "</code>", ttstext.MatchAggregate); err != nil {
 		t.Fatalf("add pattern: %v", err)
 	}
 
 	h := newTransformHarness(t, agg)
-	h.base.SetSkipAggregatorTypes(codeType)
+	h.base.SetSkipTextTypes(codeType)
 	var rec requestRecorder
 	rec.attach(h.base)
 

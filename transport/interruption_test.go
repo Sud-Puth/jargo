@@ -232,13 +232,13 @@ func TestBaseOutputInterruptionPreservesWaitingAndQueuedUninterruptibleText(t *t
 			time.Sleep(50 * time.Millisecond)
 			now := int64(o.Clock().Time())
 
-			first := frames.NewTTSTextFrame("first", frames.AggregationSentence)
+			first := frames.NewTTSTextFrame("first", frames.TextTypeSentence)
 			first.SetInterruptible(interruptible)
 			first.SetPTS(now + int64(200*time.Millisecond))
-			kept := frames.NewTTSTextFrame("kept", frames.AggregationSentence)
+			kept := frames.NewTTSTextFrame("kept", frames.TextTypeSentence)
 			kept.SetInterruptible(false)
 			kept.SetPTS(now + int64(240*time.Millisecond))
-			dropped := frames.NewTTSTextFrame("dropped", frames.AggregationSentence)
+			dropped := frames.NewTTSTextFrame("dropped", frames.TextTypeSentence)
 			dropped.SetPTS(now + int64(260*time.Millisecond))
 			for _, f := range []frames.Frame{first, kept, dropped} {
 				task.QueueFrame(f)

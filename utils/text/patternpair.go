@@ -30,9 +30,16 @@ const (
 	MatchAggregate MatchAction = "aggregate"
 )
 
-// ErrReservedAggregationType is returned by AddPattern for a type that names
+// ErrReservedTextType is returned by AddPattern for a type that names
 // how text is grouped by default, which cannot also name a pattern.
-var ErrReservedAggregationType = errors.New("aggregation type is reserved")
+var ErrReservedTextType = errors.New("text type is reserved")
+
+// ErrReservedAggregationType is the former name of ErrReservedTextType.
+//
+// Deprecated: use ErrReservedTextType.
+//
+//nolint:gochecknoglobals // sentinel error
+var ErrReservedAggregationType = ErrReservedTextType
 
 // PatternHandler is called with each completed match of the pattern it was
 // registered for.
@@ -40,7 +47,7 @@ type PatternHandler func(match Aggregation)
 
 // pattern is one registered delimiter pair and what to do with what it matches.
 type pattern struct {
-	typ    frames.AggregationType
+	typ    frames.TextType
 	start  string
 	end    string
 	action MatchAction
@@ -64,7 +71,7 @@ type PatternPairAggregator struct {
 	// patterns is kept in the order the patterns were added, because a text
 	// matching more than one is resolved by taking the first that matches.
 	patterns []*pattern
-	handlers map[frames.AggregationType]PatternHandler
+	handlers map[frames.TextType]PatternHandler
 	// lastProcessed is how far into the buffer matches have already been
 	// reported, so a handler is called once per match rather than once per
 	// character that arrives after it.
@@ -75,25 +82,25 @@ type PatternPairAggregator struct {
 // and finds sentence boundaries in language (empty uses English). Register the
 // delimiter pairs to recognize with AddPattern.
 func NewPatternPairAggregator(
-	aggregateBy frames.AggregationType, language string,
+	aggregateBy frames.TextType, language string,
 ) *PatternPairAggregator {
 	return &PatternPairAggregator{
 		SimpleAggregator: NewSimpleAggregator(aggregateBy, language),
-		handlers:         map[frames.AggregationType]PatternHandler{},
+		handlers:         map[frames.TextType]PatternHandler{},
 	}
 }
 
 // AddPattern registers a delimiter pair to recognize, under a type naming what
 // it delimits ("code", "speaker", "reasoning"). The type is what a handler is
 // registered against and what the resulting unit is labeled with, so it cannot
-// be one of the built-in aggregation types.
+// be one of the built-in text types.
 func (a *PatternPairAggregator) AddPattern(
-	typ frames.AggregationType, start, end string, action MatchAction,
+	typ frames.TextType, start, end string, action MatchAction,
 ) error {
 	switch typ {
-	case frames.AggregationSentence, frames.AggregationWord, frames.AggregationToken,
-		frames.AnyAggregation:
-		return fmt.Errorf("%w: %q", ErrReservedAggregationType, typ)
+	case frames.TextTypeSentence, frames.TextTypeWord, frames.TextTypeToken,
+		frames.AnyTextType:
+		return fmt.Errorf("%w: %q", ErrReservedTextType, typ)
 	}
 	a.patterns = append(a.patterns, &pattern{
 		typ:    typ,
@@ -110,12 +117,12 @@ func (a *PatternPairAggregator) AddPattern(
 
 // OnPatternMatch registers the handler called each time a pattern of the given
 // type completes.
-func (a *PatternPairAggregator) OnPatternMatch(typ frames.AggregationType, h PatternHandler) {
+func (a *PatternPairAggregator) OnPatternMatch(typ frames.TextType, h PatternHandler) {
 	a.handlers[typ] = h
 }
 
 // patternFor returns the registered pattern of the given type.
-func (a *PatternPairAggregator) patternFor(typ frames.AggregationType) *pattern {
+func (a *PatternPairAggregator) patternFor(typ frames.TextType) *pattern {
 	for _, p := range a.patterns {
 		if p.typ == typ {
 			return p
@@ -172,7 +179,7 @@ func (a *PatternPairAggregator) Aggregate(text string) []Aggregation {
 			continue
 		}
 
-		if a.aggregationType != frames.AggregationToken {
+		if a.aggregationType != frames.TextTypeToken {
 			if agg, ok := a.checkSentenceWithLookahead(r); ok {
 				agg.RawText = agg.Text
 				out = append(out, agg)
@@ -191,7 +198,7 @@ func (a *PatternPairAggregator) Aggregate(text string) []Aggregation {
 // has been scanned, when aggregating by token. Nothing is released while a run
 // is open, or for a buffer ending in what could be the start of one.
 func (a *PatternPairAggregator) releaseToken() (Aggregation, bool) {
-	if a.aggregationType != frames.AggregationToken || a.text == "" {
+	if a.aggregationType != frames.TextTypeToken || a.text == "" {
 		return Aggregation{}, false
 	}
 	if _, p := a.matchStartOfPattern(a.text); p != nil {
@@ -209,15 +216,15 @@ func (a *PatternPairAggregator) releaseToken() (Aggregation, bool) {
 	content := a.text[:size]
 	a.text = a.text[size:]
 	a.lastProcessed = len(a.text)
-	return Aggregation{Text: content, Type: frames.AggregationToken, RawText: content}, true
+	return Aggregation{Text: content, Type: frames.TextTypeToken, RawText: content}, true
 }
 
 // plainType is the type given to text that matched no pattern.
-func (a *PatternPairAggregator) plainType() frames.AggregationType {
-	if a.aggregationType == frames.AggregationToken {
-		return frames.AggregationToken
+func (a *PatternPairAggregator) plainType() frames.TextType {
+	if a.aggregationType == frames.TextTypeToken {
+		return frames.TextTypeToken
 	}
-	return frames.AggregationSentence
+	return frames.TextTypeSentence
 }
 
 // processCompletePatterns reports the matches that have completed in text and
@@ -388,7 +395,7 @@ func (a *PatternPairAggregator) Reset() {
 // Text reports what is buffered but not yet complete, labeled with the pattern
 // it is partway through when it is inside one.
 func (a *PatternPairAggregator) Text() Aggregation {
-	typ := frames.AggregationSentence
+	typ := frames.TextTypeSentence
 	if _, p := a.matchStartOfPattern(a.text); p != nil {
 		typ = p.typ
 	}

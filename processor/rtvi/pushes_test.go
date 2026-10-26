@@ -126,7 +126,7 @@ func TestObserverNeverHandlesAFrameDisabledOnItsFirstPush(t *testing.T) {
 
 func TestObserverHandlesAggregatedTextOnceItHasGoneThroughTheTransport(t *testing.T) {
 	h := newPushHarness(t, rtvi.DefaultObserverParams())
-	f := frames.NewAggregatedTextFrame("hello", frames.AggregationSentence)
+	f := frames.NewAggregatedTextFrame("hello", frames.TextTypeSentence)
 
 	h.push(f, true, nil)
 	h.push(frames.NewBotStartedSpeakingFrame(), true, nil)

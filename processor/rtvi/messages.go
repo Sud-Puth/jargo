@@ -342,7 +342,7 @@ type BotOutputData struct {
 	Text string `json:"text"`
 	// AggregatedBy is the unit the text stands for: a sentence, a word, or a
 	// name a pattern aggregator gave it.
-	AggregatedBy frames.AggregationType `json:"aggregated_by"`
+	AggregatedBy frames.TextType `json:"aggregated_by"`
 	// SegmentID identifies the segment, so progress reports can be matched to
 	// the text they are about.
 	SegmentID *uint64 `json:"segment_id,omitempty"`

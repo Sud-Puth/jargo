@@ -7,7 +7,7 @@ import (
 	"github.com/gojargo/jargo/utils/text"
 )
 
-func newAggregator(t *testing.T, by frames.AggregationType) *text.SimpleAggregator {
+func newAggregator(t *testing.T, by frames.TextType) *text.SimpleAggregator {
 	t.Helper()
 	return text.NewSimpleAggregator(by, "")
 }
@@ -15,7 +15,7 @@ func newAggregator(t *testing.T, by frames.AggregationType) *text.SimpleAggregat
 // A sentence is only completed once a non-whitespace character confirms the
 // boundary, so text that merely ends on a period stays buffered.
 func TestSimpleAggregatorWaitsForLookahead(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
+	a := newAggregator(t, frames.TextTypeSentence)
 
 	if got := a.Aggregate("Hello world."); len(got) != 0 {
 		t.Fatalf("a trailing period should wait for lookahead, got %+v", got)
@@ -27,15 +27,15 @@ func TestSimpleAggregatorWaitsForLookahead(t *testing.T) {
 	if len(got) != 1 || got[0].Text != "Hello world." {
 		t.Fatalf("aggregations = %+v, want one sentence %q", got, "Hello world.")
 	}
-	if got[0].Type != frames.AggregationSentence {
-		t.Fatalf("type = %q, want %q", got[0].Type, frames.AggregationSentence)
+	if got[0].Type != frames.TextTypeSentence {
+		t.Fatalf("type = %q, want %q", got[0].Type, frames.TextTypeSentence)
 	}
 }
 
 // A period inside an amount is not a boundary, which is what the lookahead is
 // there to establish.
 func TestSimpleAggregatorKeepsAmountsWhole(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
+	a := newAggregator(t, frames.TextTypeSentence)
 	got := a.Aggregate("Your balance is $29.50 today. Next")
 	if len(got) != 1 || got[0].Text != "Your balance is $29.50 today." {
 		t.Fatalf("aggregations = %+v, want the amount kept whole", got)
@@ -44,7 +44,7 @@ func TestSimpleAggregatorKeepsAmountsWhole(t *testing.T) {
 
 // One chunk carrying several boundaries completes several sentences.
 func TestSimpleAggregatorCompletesSeveralSentences(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
+	a := newAggregator(t, frames.TextTypeSentence)
 	got := a.Aggregate("One. Two. Three. X")
 	if len(got) != 3 {
 		t.Fatalf("aggregations = %+v, want three sentences", got)
@@ -58,7 +58,7 @@ func TestSimpleAggregatorCompletesSeveralSentences(t *testing.T) {
 
 // Text that never terminates is returned by the flush at the end of a response.
 func TestSimpleAggregatorFlushesTrailingText(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
+	a := newAggregator(t, frames.TextTypeSentence)
 	if got := a.Aggregate("no period here"); len(got) != 0 {
 		t.Fatalf("aggregations = %+v, want none", got)
 	}
@@ -73,9 +73,9 @@ func TestSimpleAggregatorFlushesTrailingText(t *testing.T) {
 
 // Aggregating by token buffers nothing: each chunk goes straight through.
 func TestSimpleAggregatorTokenModePassesThrough(t *testing.T) {
-	a := newAggregator(t, frames.AggregationToken)
+	a := newAggregator(t, frames.TextTypeToken)
 	got := a.Aggregate("Hel")
-	if len(got) != 1 || got[0].Text != "Hel" || got[0].Type != frames.AggregationToken {
+	if len(got) != 1 || got[0].Text != "Hel" || got[0].Type != frames.TextTypeToken {
 		t.Fatalf("aggregations = %+v, want the token as-is", got)
 	}
 	if _, ok := a.Flush(); ok {
@@ -87,8 +87,8 @@ func TestSimpleAggregatorTokenModePassesThrough(t *testing.T) {
 // is how a caller running channels of text in parallel tells whether its own
 // buffer still mirrors this one.
 func TestSimpleAggregatorReportsItsState(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
-	if a.Type() != frames.AggregationSentence {
+	a := newAggregator(t, frames.TextTypeSentence)
+	if a.Type() != frames.TextTypeSentence {
 		t.Errorf("Type() = %v, want sentence aggregation", a.Type())
 	}
 
@@ -104,7 +104,7 @@ func TestSimpleAggregatorReportsItsState(t *testing.T) {
 	if got := a.Text(); got.Text != "Hello wor" {
 		t.Errorf("Text() = %q, want it trimmed", got.Text)
 	}
-	if got := a.Text(); got.Type != frames.AggregationSentence {
+	if got := a.Text(); got.Type != frames.TextTypeSentence {
 		t.Errorf("Text() type = %v, want sentence aggregation", got.Type)
 	}
 
@@ -118,7 +118,7 @@ func TestSimpleAggregatorReportsItsState(t *testing.T) {
 // included: a mark waiting to be confirmed belongs to the turn that was cut off,
 // so the next turn must not be confirmed by the character that follows it.
 func TestSimpleAggregatorHandleInterruptionDropsWhatWasGathered(t *testing.T) {
-	a := newAggregator(t, frames.AggregationSentence)
+	a := newAggregator(t, frames.TextTypeSentence)
 
 	if got := a.Aggregate("Hello world."); len(got) != 0 {
 		t.Fatalf("a trailing period should wait for lookahead, got %+v", got)

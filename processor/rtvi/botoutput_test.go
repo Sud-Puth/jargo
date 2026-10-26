@@ -122,14 +122,14 @@ func outputs(msgs []rtvi.Message) []rtvi.BotOutputData {
 func speaking() frames.Frame { return frames.NewBotStartedSpeakingFrame() }
 
 // segment builds one unit of the bot's output, announced before synthesis.
-func segment(text string, by frames.AggregationType) *frames.AggregatedTextFrame {
+func segment(text string, by frames.TextType) *frames.AggregatedTextFrame {
 	f := frames.NewAggregatedTextFrame(text, by)
 	f.WillBeSpoken = true
 	return f
 }
 
 // spokenText builds one unit of text the synthesizer has said.
-func spokenText(text string, by frames.AggregationType) *frames.TTSTextFrame {
+func spokenText(text string, by frames.TextType) *frames.TTSTextFrame {
 	f := frames.NewTTSTextFrame(text, by)
 	f.WillBeSpoken = true
 	return f
@@ -139,7 +139,7 @@ func spokenText(text string, by frames.AggregationType) *frames.TTSTextFrame {
 // be spoken: the client can render the whole segment and highlight nothing yet.
 func TestBotOutputAnnouncesASegmentBeforeItIsSpoken(t *testing.T) {
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "",
-		speaking(), segment("Hello there.", frames.AggregationSentence))
+		speaking(), segment("Hello there.", frames.TextTypeSentence))
 
 	got := outputs(msgs)
 	if len(got) != 1 {
@@ -149,8 +149,8 @@ func TestBotOutputAnnouncesASegmentBeforeItIsSpoken(t *testing.T) {
 	if d.Text != "Hello there." {
 		t.Errorf("text = %q, want the segment", d.Text)
 	}
-	if d.AggregatedBy != frames.AggregationSentence {
-		t.Errorf("aggregated by %q, want %q", d.AggregatedBy, frames.AggregationSentence)
+	if d.AggregatedBy != frames.TextTypeSentence {
+		t.Errorf("aggregated by %q, want %q", d.AggregatedBy, frames.TextTypeSentence)
 	}
 	if d.SpokenStatus != rtvi.SpokenNew {
 		t.Errorf("status = %q, want %q", d.SpokenStatus, rtvi.SpokenNew)
@@ -177,7 +177,7 @@ func TestBotOutputAnnouncesASegmentBeforeItIsSpoken(t *testing.T) {
 // caption for it.
 func TestBotOutputReportsSpokenTextAsCompleted(t *testing.T) {
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "",
-		speaking(), spokenText("Hello there.", frames.AggregationSentence))
+		speaking(), spokenText("Hello there.", frames.TextTypeSentence))
 
 	got := outputs(msgs)
 	if len(got) != 1 {
@@ -203,8 +203,8 @@ func TestBotOutputReportsSpokenTextAsCompleted(t *testing.T) {
 // client matches the two by id, and one told about a different id for each
 // would render the sentence twice.
 func TestBotOutputCompletesASegmentSpokenInOnePieceAsThatSegment(t *testing.T) {
-	seg := segment("That sounds fun.", frames.AggregationSentence)
-	spoken := spokenText(seg.Text, frames.AggregationSentence)
+	seg := segment("That sounds fun.", frames.TextTypeSentence)
+	spoken := spokenText(seg.Text, frames.TextTypeSentence)
 	spoken.SegmentID = seg.ID()
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "", speaking(), seg, spoken)
 
@@ -248,14 +248,14 @@ func TestBotOutputSaysNothingAboutPlaybackForUnspokenText(t *testing.T) {
 
 // Each word spoken moves the segment along, and the last one finishes it.
 func TestBotOutputReportsProgressThroughASegment(t *testing.T) {
-	seg := segment("Hello there.", frames.AggregationSentence)
+	seg := segment("Hello there.", frames.TextTypeSentence)
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "",
 		speaking(),
 		seg,
 		frames.NewAggregatedTextProgressFrame(seg.ID(), "", "Hello there.",
-			frames.AggregationSentence, "Hello", " there."),
+			frames.TextTypeSentence, "Hello", " there."),
 		frames.NewAggregatedTextProgressFrame(seg.ID(), "", "Hello there.",
-			frames.AggregationSentence, "Hello there.", ""),
+			frames.TextTypeSentence, "Hello there.", ""),
 	)
 
 	got := outputs(msgs)
@@ -285,7 +285,7 @@ func TestBotOutputReportsProgressThroughASegment(t *testing.T) {
 // caption is a channel of its own and still carries every word.
 func TestBotOutputSuppressesWordSegmentsForACurrentClient(t *testing.T) {
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "2.1.0",
-		speaking(), spokenText("Hello", frames.AggregationWord))
+		speaking(), spokenText("Hello", frames.TextTypeWord))
 
 	if got := outputs(msgs); len(got) != 0 {
 		t.Errorf("got %d bot-output messages for a word, want none: %+v", len(got), got)
@@ -298,19 +298,19 @@ func TestBotOutputSuppressesWordSegmentsForACurrentClient(t *testing.T) {
 // A client of the older generation has no notion of progress within a segment,
 // so each word is reported as output in its own right and no progress is sent.
 func TestBotOutputGivesALegacyClientEachWord(t *testing.T) {
-	seg := segment("Hello there.", frames.AggregationSentence)
+	seg := segment("Hello there.", frames.TextTypeSentence)
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "1.4.0",
 		speaking(),
-		spokenText("Hello", frames.AggregationWord),
+		spokenText("Hello", frames.TextTypeWord),
 		frames.NewAggregatedTextProgressFrame(seg.ID(), "", "Hello there.",
-			frames.AggregationSentence, "Hello", " there."),
+			frames.TextTypeSentence, "Hello", " there."),
 	)
 
 	got := outputs(msgs)
 	if len(got) != 1 {
 		t.Fatalf("got %d bot-output messages, want the word alone: %+v", len(got), got)
 	}
-	if got[0].Text != "Hello" || got[0].AggregatedBy != frames.AggregationWord {
+	if got[0].Text != "Hello" || got[0].AggregatedBy != frames.TextTypeWord {
 		t.Errorf("output = %+v, want the word", got[0])
 	}
 }
@@ -320,8 +320,8 @@ func TestBotOutputGivesALegacyClientEachWord(t *testing.T) {
 // would run ahead of what the caller hears.
 func TestBotOutputHoldsSegmentsUntilTheBotIsAudible(t *testing.T) {
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "",
-		segment("First.", frames.AggregationSentence),
-		segment("Second.", frames.AggregationSentence),
+		segment("First.", frames.TextTypeSentence),
+		segment("Second.", frames.TextTypeSentence),
 		speaking(),
 	)
 
@@ -348,11 +348,11 @@ func TestBotOutputHoldsSegmentsUntilTheBotIsAudible(t *testing.T) {
 // caption for it included.
 func TestBotOutputSkipsTheAggregationTypesItWasTold(t *testing.T) {
 	params := rtvi.DefaultObserverParams()
-	params.SkipAggregatorTypes = []frames.AggregationType{"code"}
+	params.SkipTextTypes = []frames.TextType{"code"}
 	msgs := outputHarness(t, params, "",
 		speaking(),
 		spokenText("print('hi')", "code"),
-		spokenText("Done.", frames.AggregationSentence),
+		spokenText("Done.", frames.TextTypeSentence),
 	)
 
 	got := outputs(msgs)
@@ -375,7 +375,7 @@ func TestBotOutputCategoryCanBeTurnedOff(t *testing.T) {
 	params := rtvi.DefaultObserverParams()
 	params.BotOutputEnabled = off()
 	msgs := outputHarness(t, params, "",
-		speaking(), spokenText("Hello there.", frames.AggregationSentence))
+		speaking(), spokenText("Hello there.", frames.TextTypeSentence))
 
 	if got := outputs(msgs); len(got) != 0 {
 		t.Errorf("got %d bot-output messages, want none: %+v", len(got), got)
@@ -390,7 +390,7 @@ func TestBotOutputCategoryCanBeTurnedOff(t *testing.T) {
 // handover out of playback carries the timing of what the caller hears.
 func TestBotOutputReportsASegmentOnce(t *testing.T) {
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "",
-		speaking(), spokenText("Hello there.", frames.AggregationSentence))
+		speaking(), spokenText("Hello there.", frames.TextTypeSentence))
 
 	if got := outputs(msgs); len(got) != 1 {
 		t.Errorf("got %d bot-output messages, want exactly one: %+v", len(got), got)
@@ -411,7 +411,7 @@ func TestBotOutputReportsASegmentOnce(t *testing.T) {
 func TestBotOutputTransformRewritesTheSegmentAndItsCaption(t *testing.T) {
 	params := rtvi.DefaultObserverParams()
 	params.BotOutputTransforms = []rtvi.BotOutputTransformer{{
-		AggregatedBy: frames.AnyAggregation,
+		TextType: frames.AnyTextType,
 		Transform: func(seg rtvi.BotOutputText) rtvi.BotOutputText {
 			seg.Text = strings.ToUpper(seg.Text)
 			return seg
@@ -419,7 +419,7 @@ func TestBotOutputTransformRewritesTheSegmentAndItsCaption(t *testing.T) {
 	}}
 
 	msgs := outputHarness(t, params, "",
-		speaking(), spokenText("hello there.", frames.AggregationSentence))
+		speaking(), spokenText("hello there.", frames.TextTypeSentence))
 
 	got := outputs(msgs)
 	if len(got) != 1 || got[0].Text != "HELLO THERE." {
@@ -438,7 +438,7 @@ func TestBotOutputTransformRewritesTheSegmentAndItsCaption(t *testing.T) {
 func TestBotOutputTransformAppliesToItsAggregationType(t *testing.T) {
 	params := rtvi.DefaultObserverParams()
 	params.BotOutputTransforms = []rtvi.BotOutputTransformer{{
-		AggregatedBy: "code",
+		TextType: "code",
 		Transform: func(seg rtvi.BotOutputText) rtvi.BotOutputText {
 			seg.Text = "[redacted]"
 			return seg
@@ -448,7 +448,7 @@ func TestBotOutputTransformAppliesToItsAggregationType(t *testing.T) {
 	msgs := outputHarness(t, params, "",
 		speaking(),
 		spokenText("secret", "code"),
-		spokenText("Done.", frames.AggregationSentence),
+		spokenText("Done.", frames.TextTypeSentence),
 	)
 
 	got := outputs(msgs)
@@ -470,7 +470,7 @@ func TestBotOutputTransformSeesTheWholeProgressReport(t *testing.T) {
 	var seen []rtvi.BotOutputText
 	params := rtvi.DefaultObserverParams()
 	params.BotOutputTransforms = []rtvi.BotOutputTransformer{{
-		AggregatedBy: frames.AnyAggregation,
+		TextType: frames.AnyTextType,
 		Transform: func(seg rtvi.BotOutputText) rtvi.BotOutputText {
 			seen = append(seen, seg)
 			if !seg.Progress {
@@ -484,12 +484,12 @@ func TestBotOutputTransformSeesTheWholeProgressReport(t *testing.T) {
 		},
 	}}
 
-	seg := segment("Hello there.", frames.AggregationSentence)
+	seg := segment("Hello there.", frames.TextTypeSentence)
 	msgs := outputHarness(t, params, "",
 		speaking(),
 		seg,
 		frames.NewAggregatedTextProgressFrame(seg.ID(), "", "Hello there.",
-			frames.AggregationSentence, "Hello", " there."),
+			frames.TextTypeSentence, "Hello", " there."),
 	)
 
 	got := outputs(msgs)
@@ -515,7 +515,7 @@ func TestBotOutputTransformSeesTheWholeProgressReport(t *testing.T) {
 func TestBotOutputTransformCanBeAddedAndRemoved(t *testing.T) {
 	obs := rtvi.NewObserver(nil)
 	id := obs.AddBotOutputTransformer(rtvi.BotOutputTransformer{
-		AggregatedBy: frames.AnyAggregation,
+		TextType: frames.AnyTextType,
 		Transform: func(seg rtvi.BotOutputText) rtvi.BotOutputText {
 			seg.Text = strings.ToUpper(seg.Text)
 			return seg
@@ -538,7 +538,7 @@ func TestBotOutputSurvivesTheSpeakingCategoryBeingOff(t *testing.T) {
 	params.BotSpeakingEnabled = off()
 
 	msgs := outputHarness(t, params, "",
-		speaking(), spokenText("Hello there.", frames.AggregationSentence))
+		speaking(), spokenText("Hello there.", frames.TextTypeSentence))
 
 	if sent(msgs, rtvi.TypeBotStartedSpeaking) {
 		t.Errorf("the speaking event was reported with the category off, got %v", types(msgs))

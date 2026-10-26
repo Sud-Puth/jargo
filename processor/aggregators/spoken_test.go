@@ -43,7 +43,7 @@ func TestAssistantAggregatorRecordsWordsAsTheyAreSpoken(t *testing.T) {
 	runAssistant(t, convo, func(task *pipeline.Worker) {
 		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
 		for _, word := range []string{"Let", "me", "check", "that"} {
-			task.QueueFrame(frames.NewTTSTextFrame(word, frames.AggregationSentence))
+			task.QueueFrame(frames.NewTTSTextFrame(word, frames.TextTypeSentence))
 		}
 	})
 
@@ -65,8 +65,8 @@ func TestAssistantAggregatorRecordsTheWrittenForm(t *testing.T) {
 
 	runAssistant(t, convo, func(task *pipeline.Worker) {
 		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
-		task.QueueFrame(frames.NewTTSTextFrame("Room", frames.AggregationSentence))
-		spoken := frames.NewTTSTextFrame("twenty-three", frames.AggregationSentence)
+		task.QueueFrame(frames.NewTTSTextFrame("Room", frames.TextTypeSentence))
+		spoken := frames.NewTTSTextFrame("twenty-three", frames.TextTypeSentence)
 		spoken.RawText = "23"
 		task.QueueFrame(spoken)
 	})
@@ -86,7 +86,7 @@ func TestAssistantAggregatorIgnoresWordsNotBoundForTheContext(t *testing.T) {
 	runAssistant(t, convo, func(task *pipeline.Worker) {
 		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
 		for _, word := range []string{"not", "for", "the", "record"} {
-			f := frames.NewTTSTextFrame(word, frames.AggregationSentence)
+			f := frames.NewTTSTextFrame(word, frames.TextTypeSentence)
 			f.AppendToContext = false
 			task.QueueFrame(f)
 		}
@@ -107,8 +107,8 @@ func TestAssistantAggregatorKeepsOnlyTheWordsActuallySpoken(t *testing.T) {
 
 	runAssistant(t, convo, func(task *pipeline.Worker) {
 		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
-		task.QueueFrame(frames.NewTTSTextFrame("Let", frames.AggregationSentence))
-		task.QueueFrame(frames.NewTTSTextFrame("me", frames.AggregationSentence))
+		task.QueueFrame(frames.NewTTSTextFrame("Let", frames.TextTypeSentence))
+		task.QueueFrame(frames.NewTTSTextFrame("me", frames.TextTypeSentence))
 		// The words have to be recorded before the barge-in arrives, which is
 		// what playback pacing would otherwise ensure.
 		time.Sleep(300 * time.Millisecond)
@@ -215,7 +215,7 @@ func TestAssistantAggregatorCommitsSpeechThatHasNoResponseAroundIt(t *testing.T)
 	started.AppendToContext = true
 	task.QueueFrame(started)
 	for _, w := range []string{"One", "moment", "please."} {
-		task.QueueFrame(frames.NewTTSTextFrame(w, frames.AggregationSentence))
+		task.QueueFrame(frames.NewTTSTextFrame(w, frames.TextTypeSentence))
 	}
 
 	// Nothing is written while the words are still arriving: the message is the

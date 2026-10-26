@@ -28,7 +28,7 @@ type SkipTagsAggregator struct {
 // finding sentence boundaries in language (empty uses English), and holds off
 // on the boundaries between any of the given tag pairs.
 func NewSkipTagsAggregator(
-	aggregateBy frames.AggregationType, language string, tags []StartEndTags,
+	aggregateBy frames.TextType, language string, tags []StartEndTags,
 ) *SkipTagsAggregator {
 	return &SkipTagsAggregator{
 		SimpleAggregator: NewSimpleAggregator(aggregateBy, language),
@@ -43,7 +43,7 @@ func NewSkipTagsAggregator(
 // pieces. Text ending in what could be the start of a tag ("<spe" of "<spell>")
 // is held back too, until the next piece says whether it opens one.
 func (a *SkipTagsAggregator) Aggregate(text string) []Aggregation {
-	if a.aggregationType == frames.AggregationToken {
+	if a.aggregationType == frames.TextTypeToken {
 		for _, r := range text {
 			a.text += string(r)
 			a.currentTag, a.currentTagIndex = ParseStartEndTags(
@@ -66,7 +66,7 @@ func (a *SkipTagsAggregator) Aggregate(text string) []Aggregation {
 		// What is held back has not been scanned as a tag yet, so the scan
 		// starts again from the front of what is left.
 		a.currentTagIndex = 0
-		return []Aggregation{{Text: content, Type: frames.AggregationToken}}
+		return []Aggregation{{Text: content, Type: frames.TextTypeToken}}
 	}
 
 	var out []Aggregation
@@ -92,13 +92,13 @@ func (a *SkipTagsAggregator) Aggregate(text string) []Aggregation {
 // still spoken. Aggregating by token returns whatever is still held behind an
 // unclosed tag, rather than dropping it.
 func (a *SkipTagsAggregator) Flush() (Aggregation, bool) {
-	if a.aggregationType == frames.AggregationToken {
+	if a.aggregationType == frames.TextTypeToken {
 		if a.text == "" {
 			return Aggregation{}, false
 		}
 		rest := a.text
 		a.Reset()
-		return Aggregation{Text: rest, Type: frames.AggregationToken}, true
+		return Aggregation{Text: rest, Type: frames.TextTypeToken}, true
 	}
 	rest, ok := a.SimpleAggregator.Flush()
 	if ok {
@@ -135,7 +135,7 @@ func (a *SkipTagsAggregator) Reset() {
 
 // Text reports what is buffered but not yet complete.
 func (a *SkipTagsAggregator) Text() Aggregation {
-	return Aggregation{Text: strings.Trim(a.text, " "), Type: frames.AggregationSentence}
+	return Aggregation{Text: strings.Trim(a.text, " "), Type: frames.TextTypeSentence}
 }
 
 var _ Aggregator = (*SkipTagsAggregator)(nil)

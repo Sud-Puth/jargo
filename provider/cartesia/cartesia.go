@@ -75,7 +75,7 @@ type Config struct {
 	// frames.AggregationToken passes each token through as it arrives, which
 	// lowers latency at the cost of a less tested streaming path. It also decides
 	// the default for MaxBufferDelayMs.
-	TextAggregation frames.AggregationType
+	TextAggregation frames.TextType
 	// MaxBufferDelayMs is the server-side buffering window before generation
 	// starts. 0 disables server buffering (the client is buffering instead); any
 	// value in (0, 5000] enables managed buffering. Left nil it is derived from

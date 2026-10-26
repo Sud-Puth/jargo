@@ -34,7 +34,7 @@ func texts(fs []frames.Frame) []string {
 // has been spoken.
 func TestSequencerEmitsWordAndProgress(t *testing.T) {
 	s := newSeq(t, false)
-	frame := frames.NewAggregatedTextFrame("Hello world.", frames.AggregationSentence)
+	frame := frames.NewAggregatedTextFrame("Hello world.", frames.TextTypeSentence)
 	s.RegisterSpoken(frame, "c1", "Hello world.", true, true, false, "")
 
 	got := texts(s.ProcessWord("Hello", 100, "c1", false))
@@ -50,10 +50,10 @@ func TestSequencerEmitsWordAndProgress(t *testing.T) {
 // been spoken, so the conversation keeps the order it was written in.
 func TestSequencerHoldsSkippedFrameBehindSpokenOne(t *testing.T) {
 	s := newSeq(t, false)
-	spoken := frames.NewAggregatedTextFrame("Here it is.", frames.AggregationSentence)
+	spoken := frames.NewAggregatedTextFrame("Here it is.", frames.TextTypeSentence)
 	s.RegisterSpoken(spoken, "c1", "Here it is.", true, true, false, "")
 
-	skipped := frames.NewAggregatedTextFrame("code block", frames.AggregationSentence)
+	skipped := frames.NewAggregatedTextFrame("code block", frames.TextTypeSentence)
 	if got := texts(s.RegisterSkipped(skipped, "c1", "")); len(got) != 0 {
 		t.Fatalf("the skipped frame should wait, got %v", got)
 	}
@@ -73,7 +73,7 @@ func TestSequencerHoldsSkippedFrameBehindSpokenOne(t *testing.T) {
 // context emits the unspoken remainder so the conversation is still complete.
 func TestSequencerForceCompleteEmitsRemainder(t *testing.T) {
 	s := newSeq(t, false)
-	frame := frames.NewAggregatedTextFrame("One two three.", frames.AggregationSentence)
+	frame := frames.NewAggregatedTextFrame("One two three.", frames.TextTypeSentence)
 	s.RegisterSpoken(frame, "c1", "One two three.", true, true, false, "")
 	s.ProcessWord("One", 100, "c1", false)
 
@@ -93,7 +93,7 @@ func TestSequencerForceCompleteEmitsRemainder(t *testing.T) {
 func TestSequencerForceCompletePairsRemainderWithProgress(t *testing.T) {
 	s := newSeq(t, false)
 	const text = "Hello there friend"
-	s.RegisterSpoken(frames.NewAggregatedTextFrame(text, frames.AggregationSentence), "c1", text, true, true, false, "")
+	s.RegisterSpoken(frames.NewAggregatedTextFrame(text, frames.TextTypeSentence), "c1", text, true, true, false, "")
 	s.ProcessWord("Hello", 100, "c1", false)
 
 	var words []*frames.TTSTextFrame
@@ -123,7 +123,7 @@ func TestSequencerForceCompletePairsRemainderWithProgress(t *testing.T) {
 // An interruption drops everything, so no word of the abandoned turn is written.
 func TestSequencerClearDropsEverything(t *testing.T) {
 	s := newSeq(t, false)
-	frame := frames.NewAggregatedTextFrame("Hello world.", frames.AggregationSentence)
+	frame := frames.NewAggregatedTextFrame("Hello world.", frames.TextTypeSentence)
 	s.RegisterSpoken(frame, "c1", "Hello world.", true, true, false, "")
 	s.Clear()
 	if got := texts(s.ProcessWord("Hello", 100, "c1", false)); len(got) != 0 {
@@ -137,7 +137,7 @@ func TestSequencerClearDropsEverything(t *testing.T) {
 func TestSequencerStreamingPromotesOnBoundary(t *testing.T) {
 	s := newSeq(t, true)
 	send := func(tok string) []frames.Frame {
-		f := frames.NewAggregatedTextFrame(tok, frames.AggregationToken)
+		f := frames.NewAggregatedTextFrame(tok, frames.TextTypeToken)
 		return s.RegisterSpoken(f, "c1", tok, true, true, false, "")
 	}
 	if got := texts(send("Hello ")); len(got) != 0 {
@@ -169,7 +169,7 @@ func TestSequencerStreamingPromotesOnBoundary(t *testing.T) {
 // its place in the queue until every spoken unit ahead of it has been said.
 
 func spokenFrame(text string) *frames.AggregatedTextFrame {
-	return frames.NewAggregatedTextFrame(text, frames.AggregationSentence)
+	return frames.NewAggregatedTextFrame(text, frames.TextTypeSentence)
 }
 
 func skippedFrame(text string) *frames.AggregatedTextFrame {
@@ -860,15 +860,15 @@ func TestRegisterSpokenStreaming(t *testing.T) {
 			t.Fatalf("got %v, want the first sentence promoted whole, without the token "+
 				"that confirmed it", texts(out))
 		}
-		if got[0].AggregatedBy != frames.AggregationSentence {
-			t.Fatalf("promoted as %q, want a sentence", got[0].AggregatedBy)
+		if got[0].TextType != frames.TextTypeSentence {
+			t.Fatalf("promoted as %q, want a sentence", got[0].TextType)
 		}
 	})
 
 	t.Run("a sentence spoken in one piece carries its segment id", func(t *testing.T) {
 		seq := newSeq(t, true)
 		out := seq.RegisterSpoken(
-			frames.NewAggregatedTextFrame("Hi there.", frames.AggregationToken),
+			frames.NewAggregatedTextFrame("Hi there.", frames.TextTypeToken),
 			"ctx1", "Hi there.", true, false, false, "")
 		out = append(out, seq.Finalize("ctx1")...)
 		sentences, words := aggFrames(out), wordFrames(out)
@@ -1200,8 +1200,8 @@ func TestSpokenFramesSayHowTheyWereAggregated(t *testing.T) {
 		if !ok {
 			t.Fatalf("first frame is %T, want the word", out[0])
 		}
-		if word.AggregatedBy != frames.AggregationWord {
-			t.Errorf("aggregated by %q, want %q", word.AggregatedBy, frames.AggregationWord)
+		if word.TextType != frames.TextTypeWord {
+			t.Errorf("aggregated by %q, want %q", word.TextType, frames.TextTypeWord)
 		}
 	})
 
@@ -1211,7 +1211,7 @@ func TestSpokenFramesSayHowTheyWereAggregated(t *testing.T) {
 		// for a word within it.
 		seq := newSeq(t, true)
 		send := func(tok string) []frames.Frame {
-			f := frames.NewAggregatedTextFrame(tok, frames.AggregationToken)
+			f := frames.NewAggregatedTextFrame(tok, frames.TextTypeToken)
 			return seq.RegisterSpoken(f, "c1", tok, true, false, false, "")
 		}
 		send("Hello ")
@@ -1227,8 +1227,8 @@ func TestSpokenFramesSayHowTheyWereAggregated(t *testing.T) {
 		if spoken == nil {
 			t.Fatalf("got %v, want a spoken frame for the whole unit", texts(out))
 		}
-		if spoken.AggregatedBy != frames.AggregationSentence {
-			t.Errorf("aggregated by %q, want %q", spoken.AggregatedBy, frames.AggregationSentence)
+		if spoken.TextType != frames.TextTypeSentence {
+			t.Errorf("aggregated by %q, want %q", spoken.TextType, frames.TextTypeSentence)
 		}
 		if !spoken.WillBeSpoken {
 			t.Error("the frame does not say it will be spoken")

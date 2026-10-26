@@ -26,7 +26,7 @@ func (r *recorder) only(t *testing.T) text.Aggregation {
 // newPatternPair builds an aggregator carrying the two patterns most of these
 // tests use: one whose match is removed, and one returned on its own.
 func newPatternPair(
-	t *testing.T, by frames.AggregationType,
+	t *testing.T, by frames.TextType,
 ) (*text.PatternPairAggregator, *recorder, *recorder) {
 	t.Helper()
 	a := text.NewPatternPairAggregator(by, "")
@@ -45,9 +45,9 @@ func newPatternPair(
 // A built-in aggregation type describes how text is grouped by default, so it
 // cannot also name a pattern.
 func TestPatternPairRejectsAReservedType(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
-	for _, typ := range []frames.AggregationType{
-		frames.AggregationSentence, frames.AggregationWord, frames.AggregationToken,
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
+	for _, typ := range []frames.TextType{
+		frames.TextTypeSentence, frames.TextTypeWord, frames.TextTypeToken,
 	} {
 		if err := a.AddPattern(typ, "<x>", "</x>", text.MatchRemove); err == nil {
 			t.Errorf("AddPattern(%q) = nil, want an error", typ)
@@ -58,7 +58,7 @@ func TestPatternPairRejectsAReservedType(t *testing.T) {
 // A matched pattern is reported to its handler and taken out of the text, which
 // then aggregates as though the run had never been there.
 func TestPatternPairRemovesAMatch(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	got := a.Aggregate("Hello <test>pattern content</test>!")
 	if len(got) != 0 {
@@ -71,7 +71,7 @@ func TestPatternPairRemovesAMatch(t *testing.T) {
 	}
 
 	got = a.Aggregate(" This is another sentence.")
-	if len(got) != 1 || got[0].Text != "Hello !" || got[0].Type != frames.AggregationSentence {
+	if len(got) != 1 || got[0].Text != "Hello !" || got[0].Type != frames.TextTypeSentence {
 		t.Fatalf("aggregations = %+v, want one sentence %q", got, "Hello !")
 	}
 	rest, ok := a.Flush()
@@ -86,13 +86,13 @@ func TestPatternPairRemovesAMatch(t *testing.T) {
 // A pattern registered to be returned on its own releases the text before it
 // first, complete sentence or not, then the match as a unit of its own.
 func TestPatternPairReturnsAMatchOnItsOwn(t *testing.T) {
-	a, _, codeH := newPatternPair(t, frames.AggregationSentence)
+	a, _, codeH := newPatternPair(t, frames.TextTypeSentence)
 
 	got := a.Aggregate("Here is code <code>pattern content</code> This is another sentence.")
 	if len(got) != 2 {
 		t.Fatalf("aggregations = %+v, want the text before the run and the run", got)
 	}
-	if got[0].Text != "Here is code" || got[0].Type != frames.AggregationSentence {
+	if got[0].Text != "Here is code" || got[0].Type != frames.TextTypeSentence {
 		t.Fatalf("first = %+v, want %q as a sentence", got[0], "Here is code")
 	}
 	if got[1].Text != "pattern content" || got[1].Type != "code_pattern" {
@@ -112,7 +112,7 @@ func TestPatternPairReturnsAMatchOnItsOwn(t *testing.T) {
 // A run that has not closed holds everything back, and the buffer reports the
 // pattern it is partway through.
 func TestPatternPairHoldsAnIncompleteMatch(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	if got := a.Aggregate("Hello <test>pattern content"); len(got) != 0 {
 		t.Fatalf("an open run should hold its text, got %+v", got)
@@ -132,7 +132,7 @@ func TestPatternPairHoldsAnIncompleteMatch(t *testing.T) {
 // Several patterns run side by side, each with its own action: one removed, one
 // kept in the text with only its delimiters taken out.
 func TestPatternPairRunsSeveralPatterns(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
 	voiceH, emH := &recorder{}, &recorder{}
 	if err := a.AddPattern("voice", "<voice>", "</voice>", text.MatchRemove); err != nil {
 		t.Fatal(err)
@@ -164,7 +164,7 @@ func TestPatternPairRunsSeveralPatterns(t *testing.T) {
 // A run spanning several sentences is one match, and the sentences inside it
 // are not cut apart.
 func TestPatternPairMatchesAcrossSentences(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	got := a.Aggregate(
 		"Hello <test>This is sentence one. This is sentence two.</test> Final sentence.")
@@ -184,7 +184,7 @@ func TestPatternPairMatchesAcrossSentences(t *testing.T) {
 // a closed one would have been: the text before it is kept, the run is dropped,
 // and its handler is never called.
 func TestPatternPairFlushDropsAnUnclosedRemoval(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	a.Aggregate("Well <test>pattern content")
 	rest, ok := a.Flush()
@@ -204,7 +204,7 @@ func TestPatternPairFlushDropsAnUnclosedRemoval(t *testing.T) {
 
 // Nothing before the unclosed run means nothing is left to say.
 func TestPatternPairFlushDropsARunWithNothingBeforeIt(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	a.Aggregate("<test>pattern content")
 	if rest, ok := a.Flush(); ok {
@@ -217,7 +217,7 @@ func TestPatternPairFlushDropsARunWithNothingBeforeIt(t *testing.T) {
 
 // The aggregator is usable again once a flush has dropped an unclosed run.
 func TestPatternPairFlushLeavesItReusable(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	a.Aggregate("Well <test>pattern content")
 	a.Flush()
@@ -244,7 +244,7 @@ func TestPatternPairFlushLeavesItReusable(t *testing.T) {
 // A closed run earlier in the buffer must not be mistaken for the unclosed one
 // that follows it.
 func TestPatternPairFlushFindsTheUnclosedOccurrence(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	got := a.Aggregate("Start <test>closed</test> middle <test>unclosed")
 	rest, _ := a.Flush()
@@ -266,7 +266,7 @@ func TestPatternPairFlushFindsTheUnclosedOccurrence(t *testing.T) {
 // Two unclosed runs of different patterns: the cut is made at whichever opens
 // first in the text, not whichever pattern was registered first.
 func TestPatternPairFlushCutsAtTheEarliestRun(t *testing.T) {
-	a := text.NewPatternPairAggregator(frames.AggregationSentence, "")
+	a := text.NewPatternPairAggregator(frames.TextTypeSentence, "")
 	// Registered in the reverse of the order they appear in the text.
 	if err := a.AddPattern("voice", "<voice>", "</voice>", text.MatchRemove); err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestPatternPairFlushCutsAtTheEarliestRun(t *testing.T) {
 // A run whose content is kept is spoken whether or not it closed, so an
 // unclosed one is kept verbatim rather than dropped.
 func TestPatternPairFlushKeepsAnUnclosedKeep(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
 	if err := a.AddPattern("emphasis", "<em>", "</em>", text.MatchKeep); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestPatternPairFlushKeepsAnUnclosedKeep(t *testing.T) {
 
 // A closed kept run earlier in the buffer is not mistaken for the unclosed one.
 func TestPatternPairFlushKeepsBothKeptRuns(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
 	if err := a.AddPattern("emphasis", "<em>", "</em>", text.MatchKeep); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestPatternPairFlushKeepsBothKeptRuns(t *testing.T) {
 // A run to be returned on its own is never spoken as it stands, so an unclosed
 // one is dropped and its handler is not called.
 func TestPatternPairFlushDropsAnUnclosedAggregate(t *testing.T) {
-	a, _, codeH := newPatternPair(t, frames.AggregationSentence)
+	a, _, codeH := newPatternPair(t, frames.TextTypeSentence)
 
 	got := a.Aggregate("Before <code>unclosed content")
 	if len(got) != 1 || got[0].Text != "Before" {
@@ -341,7 +341,7 @@ func TestPatternPairFlushDropsAnUnclosedAggregate(t *testing.T) {
 // A stream cut off partway through an opening delimiter has the partial
 // delimiter trimmed rather than spoken.
 func TestPatternPairFlushTrimsAPartialDelimiter(t *testing.T) {
-	a, _, _ := newPatternPair(t, frames.AggregationSentence)
+	a, _, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	a.Aggregate("Hello <te")
 	rest, ok := a.Flush()
@@ -353,7 +353,7 @@ func TestPatternPairFlushTrimsAPartialDelimiter(t *testing.T) {
 // newThinkPair builds a token-mode aggregator carrying one removed pattern.
 func newThinkPair(t *testing.T) (*text.PatternPairAggregator, *recorder) {
 	t.Helper()
-	a := text.NewPatternPairAggregator(frames.AggregationToken, "")
+	a := text.NewPatternPairAggregator(frames.TextTypeToken, "")
 	if err := a.AddPattern("think", "<think>", "</think>", text.MatchRemove); err != nil {
 		t.Fatal(err)
 	}
@@ -375,8 +375,8 @@ func TestPatternPairTokenPassesTextThrough(t *testing.T) {
 		t.Fatalf("aggregations = %q, want %q", texts(got), want)
 	}
 	for _, g := range got {
-		if g.Type != frames.AggregationToken {
-			t.Fatalf("type = %q, want %q", g.Type, frames.AggregationToken)
+		if g.Type != frames.TextTypeToken {
+			t.Fatalf("type = %q, want %q", g.Type, frames.TextTypeToken)
 		}
 	}
 }
@@ -517,13 +517,13 @@ func TestPatternPairTokenReassemblesAnAggregateDelimiter(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("aggregations = %+v, want three", got)
 	}
-	if got[0].Type != frames.AggregationToken || got[0].Text != "Here is code " {
+	if got[0].Type != frames.TextTypeToken || got[0].Text != "Here is code " {
 		t.Fatalf("first = %+v", got[0])
 	}
 	if got[1].Type != "code_pattern" || got[1].Text != "pattern content" {
 		t.Fatalf("second = %+v", got[1])
 	}
-	if got[2].Type != frames.AggregationToken || got[2].Text != " more" {
+	if got[2].Type != frames.TextTypeToken || got[2].Text != " more" {
 		t.Fatalf("third = %+v", got[2])
 	}
 }
@@ -555,7 +555,7 @@ func TestPatternPairTokenReassemblesAKeptDelimiter(t *testing.T) {
 // patterns survive it, as they survive a reset: they describe the text this
 // aggregator reads, not the response it was partway through.
 func TestPatternPairHandleInterruptionKeepsThePatterns(t *testing.T) {
-	a, testH, _ := newPatternPair(t, frames.AggregationSentence)
+	a, testH, _ := newPatternPair(t, frames.TextTypeSentence)
 
 	if got := a.Aggregate("Hello <test>pattern content"); len(got) != 0 {
 		t.Fatalf("an open run should hold its text, got %+v", got)

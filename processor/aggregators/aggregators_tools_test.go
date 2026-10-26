@@ -359,7 +359,7 @@ func TestAsyncToolResultAfterSpokenFillerSettlesInPlace(t *testing.T) {
 		frames.NewFunctionCallsStartedFrame([]frames.ToolCall{{ID: "c1", Name: "lookup"}}),
 		inProgressAsync("c1", "lookup"),
 		started,
-		frames.NewTTSTextFrame("Let me check on that.", frames.AggregationSentence),
+		frames.NewTTSTextFrame("Let me check on that.", frames.TextTypeSentence),
 		frames.NewLLMAssistantPushAggregationFrame(),
 		noRun(frames.NewFunctionCallResultFrame("c1", "lookup", nil, "42")),
 	)

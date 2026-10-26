@@ -153,7 +153,7 @@ func TestProcessorLifecycleAndFunctionCalls(t *testing.T) {
 
 	// The text the TTS reports speaking, not the text on its way into it. It is
 	// one segment of the bot's output and, separately, the caption for it.
-	task.QueueFrame(frames.NewTTSTextFrame("sunny", frames.AggregationSentence))
+	task.QueueFrame(frames.NewTTSTextFrame("sunny", frames.TextTypeSentence))
 	if got := waitMessage(t, out); got.Type != rtvi.TypeBotOutput {
 		t.Fatalf("expected bot-output, got %+v", got)
 	}

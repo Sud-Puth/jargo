@@ -99,8 +99,8 @@ func (h *transformHarness) recorded() []string {
 func TestTextTransformReshapesWhatTheProviderIsGiven(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return strings.ReplaceAll(text, "@", " at "), nil
 		},
 	})
@@ -118,8 +118,8 @@ func TestTextTransformReshapesWhatTheProviderIsGiven(t *testing.T) {
 func TestTextTransformDoesNotReachTheConversation(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return "<spell>" + text + "</spell>", nil
 		},
 	})
@@ -139,8 +139,8 @@ func TestTextTransformOnlyRunsForItsAggregationType(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	var ran int
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AggregationToken,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.TextTypeToken,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			ran++
 			return "changed", nil
 		},
@@ -162,14 +162,14 @@ func TestTextTransformOnlyRunsForItsAggregationType(t *testing.T) {
 func TestTextTransformsRunInOrder(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	h.base.AddTextTransformer(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return text + " one", nil
 		},
 	})
 	h.base.AddTextTransformer(tts.TextTransformer{
-		AggregatedBy: frames.AggregationSentence,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.TextTypeSentence,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return text + " two", nil
 		},
 	})
@@ -189,8 +189,8 @@ func TestTextTransformsRunInOrder(t *testing.T) {
 func TestFailingTextTransformLeavesTheServiceUsable(t *testing.T) {
 	h := newTransformHarness(t, nil)
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, _ string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, _ string, _ frames.TextType) (string, error) {
 			return "", errTransform
 		},
 	})

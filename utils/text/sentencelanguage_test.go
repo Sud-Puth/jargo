@@ -36,7 +36,7 @@ func TestMatchEndOfSentenceSourceOffsets(t *testing.T) {
 // aggregateInChunks runs text through an aggregator in chunks of size runes and
 // returns the sentences it produced, the flushed tail included.
 func aggregateInChunks(language, input string, size int) []string {
-	a := text.NewSimpleAggregator(frames.AggregationSentence, language)
+	a := text.NewSimpleAggregator(frames.TextTypeSentence, language)
 	runes := []rune(input)
 	var out []string
 	for i := 0; i < len(runes); i += size {
@@ -127,7 +127,7 @@ func TestPendingRetryIsClearedBetweenGenerations(t *testing.T) {
 	}
 	for name, end := range endings {
 		t.Run(name, func(t *testing.T) {
-			a := text.NewSimpleAggregator(frames.AggregationSentence, "")
+			a := text.NewSimpleAggregator(frames.TextTypeSentence, "")
 			if got := a.Aggregate(pending); len(got) != 0 {
 				t.Fatalf("aggregations = %+v, want none", got)
 			}
@@ -149,7 +149,7 @@ func TestOpenQuotePreservesAbbreviations(t *testing.T) {
 	for _, quote := range []string{`"`, "'", "“", "‘", "«", "「"} {
 		for _, size := range []int{1, 3, 1000} {
 			input := fmt.Sprintf("She said, %sDr. Smith is here. Next sentence", quote)
-			a := text.NewSimpleAggregator(frames.AggregationSentence, "")
+			a := text.NewSimpleAggregator(frames.TextTypeSentence, "")
 			runes := []rune(input)
 			var got []string
 			for i := 0; i < len(runes); i += size {
@@ -228,7 +228,7 @@ func TestEnglishBoundariesPreserveTextAcrossChunks(t *testing.T) {
 				chunkings[fmt.Sprintf("%d characters", size)] = chunks
 			}
 			for chunking, chunks := range chunkings {
-				a := text.NewSimpleAggregator(frames.AggregationSentence, "")
+				a := text.NewSimpleAggregator(frames.TextTypeSentence, "")
 				var got []string
 				for _, c := range chunks {
 					for _, agg := range a.Aggregate(c) {
@@ -263,8 +263,8 @@ func TestResolveSentenceTokenizerLanguage(t *testing.T) {
 
 // Two aggregators in different languages keep their own rules.
 func TestStreamingLanguagesAreIndependent(t *testing.T) {
-	german := text.NewSimpleAggregator(frames.AggregationSentence, "de")
-	english := text.NewSimpleAggregator(frames.AggregationSentence, "en")
+	german := text.NewSimpleAggregator(frames.TextTypeSentence, "de")
+	english := text.NewSimpleAggregator(frames.TextTypeSentence, "en")
 	if got := german.Aggregate("Das ist bzw. w"); len(got) != 0 {
 		t.Fatalf("german = %+v, want nothing: bzw. is an abbreviation", got)
 	}

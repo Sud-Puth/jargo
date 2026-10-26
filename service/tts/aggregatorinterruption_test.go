@@ -25,7 +25,7 @@ type clearingSpy struct {
 func newClearingSpy(t *testing.T) *clearingSpy {
 	t.Helper()
 	return &clearingSpy{
-		SimpleAggregator: ttstext.NewSimpleAggregator(frames.AggregationSentence, ""),
+		SimpleAggregator: ttstext.NewSimpleAggregator(frames.TextTypeSentence, ""),
 	}
 }
 

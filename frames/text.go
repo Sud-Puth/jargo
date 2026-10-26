@@ -59,7 +59,7 @@ func NewLLMTextFrame(text string) *LLMTextFrame {
 // plays; because they flow in step with playback, an interruption leaves only
 // the frames already emitted, the words actually spoken, in the context.
 //
-// It is an aggregated frame: AggregatedBy says what unit the text is, a whole
+// It is an aggregated frame: TextType says what unit the text is, a whole
 // sentence for a service that reports no timings and a single word for one that
 // does, which is how a consumer tells a caption to render from a word to
 // highlight within it.
@@ -71,10 +71,10 @@ type TTSTextFrame struct {
 	SegmentID uint64
 }
 
-// NewTTSTextFrame builds a TTSTextFrame for the spoken text, aggregated by by
+// NewTTSTextFrame builds a TTSTextFrame for the spoken text, of the text type by
 // and appended to the LLM context by default. Word tokens do not carry their
 // own inter-frame spacing, so a consumer joins them with a separator.
-func NewTTSTextFrame(text string, by AggregationType) *TTSTextFrame {
+func NewTTSTextFrame(text string, by TextType) *TTSTextFrame {
 	f := &TTSTextFrame{AggregatedTextFrame: *NewAggregatedTextFrame(text, by)}
 	f.BaseDataFrame = NewBaseDataFrame("TTSTextFrame")
 	return f
@@ -241,29 +241,49 @@ var (
 	_ DataFrame = (*EagerTranscriptionFrame)(nil)
 )
 
-// AggregationType names how a stream of text was aggregated before synthesis.
-type AggregationType string
+// TextType is the kind of text a frame holds: a sentence, a word, or a custom
+// type such as "code", which a pattern-matching aggregator gives the text it
+// cuts out.
+type TextType string
 
-// The built-in aggregation types.
+// The built-in text types.
 const (
-	// AggregationSentence aggregates text up to a sentence boundary.
-	AggregationSentence AggregationType = "sentence"
-	// AggregationToken passes each token through as it arrives.
-	AggregationToken AggregationType = "token"
-	// AggregationWord aggregates text a word at a time.
-	AggregationWord AggregationType = "word"
-	// AnyAggregation is not a way of aggregating text but a wildcard standing for
-	// every one of them, for something registered against a type that should
-	// apply whatever the unit was grouped by.
-	AnyAggregation AggregationType = "*"
+	// TextTypeSentence is text aggregated up to a sentence boundary.
+	TextTypeSentence TextType = "sentence"
+	// TextTypeToken is each token passed through as it arrives.
+	TextTypeToken TextType = "token"
+	// TextTypeWord is text a word at a time.
+	TextTypeWord TextType = "word"
+	// AnyTextType is not a kind of text but a wildcard standing for every one
+	// of them, for something registered against a type that should apply
+	// whatever the text is.
+	AnyTextType TextType = "*"
+)
+
+// AggregationType is the former name of TextType.
+//
+// Deprecated: use TextType.
+type AggregationType = TextType
+
+// The former names of the built-in text types.
+const (
+	// Deprecated: use TextTypeSentence.
+	AggregationSentence = TextTypeSentence
+	// Deprecated: use TextTypeToken.
+	AggregationToken = TextTypeToken
+	// Deprecated: use TextTypeWord.
+	AggregationWord = TextTypeWord
+	// Deprecated: use AnyTextType.
+	AnyAggregation = AnyTextType
 )
 
 // AggregatedTextFrame is a run of TextFrames aggregated into one unit for
-// synthesis, carrying how they were aggregated.
+// synthesis, carrying what kind of text they make.
 type AggregatedTextFrame struct {
 	TextFrame
-	// AggregatedBy is how the text was aggregated.
-	AggregatedBy AggregationType
+	// TextType is the kind of text, such as a sentence, a word or a custom type
+	// like "code".
+	TextType TextType
 	// ContextID identifies the synthesis context this text was sent on.
 	ContextID string
 	// RawText is the full matched text including any pattern delimiters, set
@@ -275,11 +295,11 @@ type AggregatedTextFrame struct {
 	WillBeSpoken bool
 }
 
-// NewAggregatedTextFrame builds an AggregatedTextFrame aggregated by by.
-func NewAggregatedTextFrame(text string, by AggregationType) *AggregatedTextFrame {
+// NewAggregatedTextFrame builds an AggregatedTextFrame of the given text type.
+func NewAggregatedTextFrame(text string, by TextType) *AggregatedTextFrame {
 	f := &AggregatedTextFrame{
-		TextFrame:    *NewTextFrame(text),
-		AggregatedBy: by,
+		TextFrame: *NewTextFrame(text),
+		TextType:  by,
 	}
 	f.BaseDataFrame = NewBaseDataFrame("AggregatedTextFrame")
 	return f
@@ -287,7 +307,7 @@ func NewAggregatedTextFrame(text string, by AggregationType) *AggregatedTextFram
 
 // String implements fmt.Stringer.
 func (f *AggregatedTextFrame) String() string {
-	return fmt.Sprintf("%s(pts: %s, text: [%s], by: %s)", f.Name(), formatPTS(f), f.Text, f.AggregatedBy)
+	return fmt.Sprintf("%s(pts: %s, text: [%s], text_type: %s)", f.Name(), formatPTS(f), f.Text, f.TextType)
 }
 
 // AggregatedTextProgressFrame accompanies each TTSTextFrame during
@@ -302,8 +322,8 @@ type AggregatedTextProgressFrame struct {
 	ContextID string
 	// Text is the full original text of the frame being spoken.
 	Text string
-	// AggregatedBy is how that text was aggregated.
-	AggregatedBy AggregationType
+	// TextType is the text type of that frame.
+	TextType TextType
 	// AccumulatedText is what has been spoken so far, including the current word.
 	AccumulatedText string
 	// RemainingText is what has not been spoken yet.
@@ -312,14 +332,14 @@ type AggregatedTextProgressFrame struct {
 
 // NewAggregatedTextProgressFrame builds an AggregatedTextProgressFrame.
 func NewAggregatedTextProgressFrame(segmentID uint64, contextID, text string,
-	by AggregationType, accumulated, remaining string,
+	by TextType, accumulated, remaining string,
 ) *AggregatedTextProgressFrame {
 	return &AggregatedTextProgressFrame{
 		BaseDataFrame:   NewBaseDataFrame("AggregatedTextProgressFrame"),
 		SegmentID:       segmentID,
 		ContextID:       contextID,
 		Text:            text,
-		AggregatedBy:    by,
+		TextType:        by,
 		AccumulatedText: accumulated,
 		RemainingText:   remaining,
 	}

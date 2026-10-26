@@ -11,7 +11,7 @@ import (
 // textTransform is the shape the TTS base's text transformers take, spelled out
 // here rather than imported: service/tts already depends on this package, so it
 // cannot be depended on back.
-type textTransform func(ctx context.Context, text string, aggregatedBy frames.AggregationType) (string, error)
+type textTransform func(ctx context.Context, text string, aggregatedBy frames.TextType) (string, error)
 
 // TestVoiceFormatterIsATextTransform checks a VoiceFormatter can be handed
 // straight to the TTS base's text transformers. It is the shape the base takes,
@@ -24,7 +24,7 @@ func TestVoiceFormatterIsATextTransform(t *testing.T) {
 
 	var transform textTransform = f.Transform
 
-	got, err := transform(t.Context(), "The API costs $5", frames.AnyAggregation)
+	got, err := transform(t.Context(), "The API costs $5", frames.AnyTextType)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
 	}

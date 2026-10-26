@@ -18,7 +18,7 @@ func streamedSeq(t *testing.T, tokens ...string) *AggregatedFrameSequencer {
 	s := NewAggregatedFrameSequencer("Test", true)
 	for _, token := range tokens {
 		s.RegisterSpoken(
-			frames.NewAggregatedTextFrame(token, frames.AggregationToken), "ctx1", token, true, true, false, "")
+			frames.NewAggregatedTextFrame(token, frames.TextTypeToken), "ctx1", token, true, true, false, "")
 	}
 	return s
 }
@@ -96,7 +96,7 @@ func TestParallelChannelsUseTheSameLanguageForSlicing(t *testing.T) {
 }
 
 func feedToken(s *AggregatedFrameSequencer, contextID, text, language string) {
-	s.RegisterSpoken(frames.NewAggregatedTextFrame(text, frames.AggregationToken), contextID, text,
+	s.RegisterSpoken(frames.NewAggregatedTextFrame(text, frames.TextTypeToken), contextID, text,
 		true, true, false, language)
 }
 

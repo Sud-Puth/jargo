@@ -434,7 +434,7 @@ func TestConversationReleasesHeldSpeech(t *testing.T) {
 	d, _ := newDetector(t, voicemail.Config{}, answer{label: "conversation", confidence: 0.9})
 	down, _ := run(t, []processor.Processor{d, d.Gate()},
 		frames.NewTTSStartedFrame(),
-		frames.NewTTSTextFrame("Hi, this is Alex.", frames.AggregationSentence),
+		frames.NewTTSTextFrame("Hi, this is Alex.", frames.TextTypeSentence),
 		200*time.Millisecond,
 		said("Hello?"),
 		verdictSettle,
@@ -450,7 +450,7 @@ func TestVoicemailDropsHeldSpeechAndBlocksLaterInput(t *testing.T) {
 	d, _ := newDetector(t, voicemail.Config{}, answer{label: "voicemail", confidence: 0.95})
 	down, _ := run(t, []processor.Processor{d, d.Gate()},
 		frames.NewTTSStartedFrame(),
-		frames.NewTTSTextFrame("Hi, this is Alex.", frames.AggregationSentence),
+		frames.NewTTSTextFrame("Hi, this is Alex.", frames.TextTypeSentence),
 		200*time.Millisecond,
 		said("Please leave a message."),
 		verdictSettle,

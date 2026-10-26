@@ -63,7 +63,7 @@ func collectAggregated(
 // grouped. A service passing tokens straight through says so, rather than
 // describing every token as a sentence.
 func TestAggregatedTextCarriesHowItWasGrouped(t *testing.T) {
-	agg := ttstext.NewSimpleAggregator(frames.AggregationToken, "")
+	agg := ttstext.NewSimpleAggregator(frames.TextTypeToken, "")
 	got := collectAggregated(t, agg, func(task *pipeline.Worker) {
 		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
 		task.QueueFrame(frames.NewLLMTextFrame("Hello there."))
@@ -73,8 +73,8 @@ func TestAggregatedTextCarriesHowItWasGrouped(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("no aggregated text reached the pipeline")
 	}
-	if got[0].AggregatedBy != frames.AggregationToken {
-		t.Errorf("aggregated by = %q, want %q", got[0].AggregatedBy, frames.AggregationToken)
+	if got[0].TextType != frames.TextTypeToken {
+		t.Errorf("aggregated by = %q, want %q", got[0].TextType, frames.TextTypeToken)
 	}
 	if got[0].RawText != "Hello there." {
 		t.Errorf("raw text = %q, want the text as written", got[0].RawText)
@@ -85,7 +85,7 @@ func TestAggregatedTextCarriesHowItWasGrouped(t *testing.T) {
 // consumer recording the conversation has the delimiters the model wrote even
 // though only the content is spoken.
 func TestAggregatedTextCarriesTheTextItWasCutFrom(t *testing.T) {
-	agg := ttstext.NewPatternPairAggregator(frames.AggregationSentence, "")
+	agg := ttstext.NewPatternPairAggregator(frames.TextTypeSentence, "")
 	if err := agg.AddPattern("code", "<code>", "</code>", ttstext.MatchAggregate); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestAggregatedTextCarriesTheTextItWasCutFrom(t *testing.T) {
 
 	var code *frames.AggregatedTextFrame
 	for _, f := range got {
-		if f.AggregatedBy == "code" {
+		if f.TextType == "code" {
 			code = f
 		}
 	}

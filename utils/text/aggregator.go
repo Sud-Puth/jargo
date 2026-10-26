@@ -14,7 +14,7 @@ type Aggregation struct {
 	// Text is the aggregated text.
 	Text string
 	// Type is how it was aggregated.
-	Type frames.AggregationType
+	Type frames.TextType
 	// RawText is the text this unit was cut from, delimiters and all, set when
 	// the unit came from a matched pattern such as a code block. Empty for an
 	// ordinary aggregation, where Text is already the written form.
@@ -35,7 +35,7 @@ type Aggregator interface {
 	// Type is how this aggregator groups text. A caller reads it to know what to
 	// expect before any text has been aggregated: grouping by token, say, means
 	// no unit ever completes a sentence.
-	Type() frames.AggregationType
+	Type() frames.TextType
 	// Text reports what is buffered but not yet complete.
 	Text() Aggregation
 	// Aggregate folds text into the buffer and returns every unit it completed.
@@ -70,7 +70,7 @@ type Aggregator interface {
 // both, and neither does more punctuation: the second dot of "..." is part of
 // the same mark.
 type SimpleAggregator struct {
-	aggregationType frames.AggregationType
+	aggregationType frames.TextType
 	language        string
 	text            string
 	lookahead       lookaheadState
@@ -104,7 +104,7 @@ const (
 
 // NewSimpleAggregator builds an aggregator that groups text by aggregateBy,
 // finding sentence boundaries in language; empty uses English.
-func NewSimpleAggregator(aggregateBy frames.AggregationType, language string) *SimpleAggregator {
+func NewSimpleAggregator(aggregateBy frames.TextType, language string) *SimpleAggregator {
 	return &SimpleAggregator{aggregationType: aggregateBy, language: ResolveSentenceTokenizerLanguage(language)}
 }
 
@@ -122,21 +122,21 @@ func (a *SimpleAggregator) SetLanguage(language string) {
 // sentence-sized synthesis gives for the latency of not waiting for one to
 // finish.
 func NewTokenAggregator() *SimpleAggregator {
-	return &SimpleAggregator{aggregationType: frames.AggregationToken, language: ResolveSentenceTokenizerLanguage("")}
+	return &SimpleAggregator{aggregationType: frames.TextTypeToken, language: ResolveSentenceTokenizerLanguage("")}
 }
 
 // Type implements Aggregator.
-func (a *SimpleAggregator) Type() frames.AggregationType { return a.aggregationType }
+func (a *SimpleAggregator) Type() frames.TextType { return a.aggregationType }
 
 // Aggregate implements Aggregator. Aggregating by token returns the text as it
 // arrives; aggregating by sentence walks it a character at a time, so a chunk
 // carrying more than one boundary completes more than one sentence.
 func (a *SimpleAggregator) Aggregate(text string) []Aggregation {
-	if a.aggregationType == frames.AggregationToken {
+	if a.aggregationType == frames.TextTypeToken {
 		if text == "" {
 			return nil
 		}
-		return []Aggregation{{Text: text, Type: frames.AggregationToken}}
+		return []Aggregation{{Text: text, Type: frames.TextTypeToken}}
 	}
 	var out []Aggregation
 	for _, r := range text {
@@ -188,7 +188,7 @@ func (a *SimpleAggregator) checkSentenceWithLookahead(r rune) (Aggregation, bool
 			candidate = a.text[:len(a.text)-utf8.RuneLen(r)]
 		}
 		if end := matchEndOfSentence(candidate, a.language); end > 0 {
-			result = Aggregation{Text: strings.Trim(a.text[:end], " "), Type: frames.AggregationSentence}
+			result = Aggregation{Text: strings.Trim(a.text[:end], " "), Type: frames.TextTypeSentence}
 			ok = true
 			// Keep the lookahead text for the next sentence ("N" in "Hello. N").
 			a.text = a.text[end:]
@@ -253,12 +253,12 @@ func isAlnum(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
 // Flush implements Aggregator. Aggregating by token buffers nothing, so there is
 // never anything left.
 func (a *SimpleAggregator) Flush() (Aggregation, bool) {
-	if a.aggregationType == frames.AggregationToken || a.text == "" {
+	if a.aggregationType == frames.TextTypeToken || a.text == "" {
 		return Aggregation{}, false
 	}
 	rest := a.text
 	a.Reset()
-	return Aggregation{Text: strings.Trim(rest, " "), Type: frames.AggregationSentence}, true
+	return Aggregation{Text: strings.Trim(rest, " "), Type: frames.TextTypeSentence}, true
 }
 
 // HandleInterruption implements Aggregator. What was half-gathered belongs to
@@ -281,7 +281,7 @@ func (a *SimpleAggregator) Reset() {
 
 // Text reports what is buffered but not yet complete.
 func (a *SimpleAggregator) Text() Aggregation {
-	return Aggregation{Text: strings.Trim(a.text, " "), Type: frames.AggregationSentence}
+	return Aggregation{Text: strings.Trim(a.text, " "), Type: frames.TextTypeSentence}
 }
 
 // Buffer reports the raw buffered text, untrimmed. A caller running channels of

@@ -76,14 +76,14 @@ func ttsDefaults(cfg Config) Config {
 		cfg.Container = defaultContainer
 	}
 	if cfg.TextAggregation == "" {
-		cfg.TextAggregation = frames.AggregationSentence
+		cfg.TextAggregation = frames.TextTypeSentence
 	}
 	// Cartesia warns against the middle ground of client-side sentence
 	// aggregation plus the server's default 3000ms buffer. With no value chosen,
 	// send 0 when sentences are aggregated here and leave it unset when tokens
 	// are streamed, so the server's managed buffering applies to the one shape it
 	// suits.
-	if cfg.MaxBufferDelayMs == nil && cfg.TextAggregation != frames.AggregationToken {
+	if cfg.MaxBufferDelayMs == nil && cfg.TextAggregation != frames.TextTypeToken {
 		zero := 0
 		cfg.MaxBufferDelayMs = &zero
 	}

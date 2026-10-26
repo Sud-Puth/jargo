@@ -218,8 +218,8 @@ type Base struct {
 	// skipped, not for every sentence.
 	skippingPronunciations bool
 	// skipTypes name the ways of grouping text whose units are not spoken. See
-	// SetSkipAggregatorTypes.
-	skipTypes []frames.AggregationType
+	// SetSkipTextTypes.
+	skipTypes []frames.TextType
 
 	// appendTrailingSpace says the provider needs the text it synthesizes to end
 	// in a space. See TrailingSpaceRequirer.
@@ -329,7 +329,7 @@ func New(name string, syn Synthesizer) *Base {
 	b := &Base{syn: syn, zeroAudioLimit: defaultZeroAudioContextLimit, stopFrameTimeout: defaultStopFrameTimeout}
 	// Sentences are found in the language the service speaks, English when its
 	// settings name none.
-	b.aggregator = ttstext.NewSimpleAggregator(frames.AggregationSentence, settingsLanguage(syn))
+	b.aggregator = ttstext.NewSimpleAggregator(frames.TextTypeSentence, settingsLanguage(syn))
 	b.sequencer = uctx.NewAggregatedFrameSequencer(name, false)
 	if d, ok := syn.(Describer); ok {
 		b.meta = d.Metadata()
@@ -381,7 +381,7 @@ func (b *Base) SetTextAggregator(a ttstext.Aggregator) {
 	// tokens it assembles them back into sentences and opens a slot only once a
 	// boundary is confirmed; given whole units it opens one per unit. Built here
 	// rather than read at push time because the mode is fixed for the run.
-	b.sequencer = uctx.NewAggregatedFrameSequencer(b.Name(), a.Type() == frames.AggregationToken)
+	b.sequencer = uctx.NewAggregatedFrameSequencer(b.Name(), a.Type() == frames.TextTypeToken)
 }
 
 // EventTTSRequest fires just before each unit of text is handed to the
@@ -414,14 +414,18 @@ type TTSRequest struct {
 // Returning an error abandons the unit: it produces no audio and the failure is
 // reported as an application error. Speaking the untransformed text instead is
 // not safe, because a transform may exist precisely to take something out.
-type TextTransform func(ctx context.Context, text string, aggregatedBy frames.AggregationType) (string, error)
+type TextTransform func(ctx context.Context, text string, aggregatedBy frames.TextType) (string, error)
 
-// TextTransformer pairs a transform with the aggregation type whose units it
-// applies to.
+// TextTransformer pairs a transform with the text type whose units it applies
+// to.
 type TextTransformer struct {
-	// AggregatedBy names the units this transform applies to. Use
-	// frames.AnyAggregation for every unit, whatever it was grouped by.
-	AggregatedBy frames.AggregationType
+	// TextType names the units this transform applies to. Use
+	// frames.AnyTextType for every unit, whatever its type.
+	TextType frames.TextType
+	// AggregatedBy is the former name of TextType, read when TextType is empty.
+	//
+	// Deprecated: use TextType.
+	AggregatedBy frames.TextType
 	// Transform is the reshaping itself.
 	Transform TextTransform
 
@@ -472,8 +476,8 @@ func (b *Base) PronunciationTransformIPA(pronunciations map[string]string) TextT
 	name, _, _ := strings.Cut(b.Name(), "#")
 	t := ttstext.NewPronunciationTransform(pronunciations, format, name)
 	return TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+		TextType: frames.AnyTextType,
+		Transform: func(_ context.Context, text string, _ frames.TextType) (string, error) {
 			return t.Apply(text), nil
 		},
 		pronunciation: true,
@@ -502,25 +506,36 @@ func (b *Base) canApplyPronunciations() bool {
 // Replacing the list is also how a transform is withdrawn: Go function values
 // cannot be compared, so there is no removing one by naming it.
 func (b *Base) SetTextTransformers(ts ...TextTransformer) {
-	b.transforms = ts
+	b.transforms = make([]TextTransformer, len(ts))
+	for i, t := range ts {
+		b.transforms[i] = t.withTextType()
+	}
 }
 
 // AddTextTransformer appends one transform to those already set, for a caller
 // registering them as it builds the service rather than all at once.
 func (b *Base) AddTextTransformer(t TextTransformer) {
-	b.transforms = append(b.transforms, t)
+	b.transforms = append(b.transforms, t.withTextType())
+}
+
+// withTextType fills TextType from the deprecated AggregatedBy when it is empty.
+func (t TextTransformer) withTextType() TextTransformer {
+	if t.TextType == "" {
+		t.TextType = t.AggregatedBy //nolint:staticcheck // the deprecated field is honored
+	}
+	return t
 }
 
 // transformText applies the transforms whose type matches how this unit was
 // aggregated. It reports false when one of them failed, which abandons the unit.
 func (b *Base) transformText(
-	ctx context.Context, text string, aggregatedBy frames.AggregationType,
+	ctx context.Context, text string, aggregatedBy frames.TextType,
 ) (string, bool) {
 	for _, t := range b.transforms {
 		if t.Transform == nil {
 			continue
 		}
-		if t.AggregatedBy != aggregatedBy && t.AggregatedBy != frames.AnyAggregation {
+		if t.TextType != aggregatedBy && t.TextType != frames.AnyTextType {
 			continue
 		}
 		if t.pronunciation && !b.canApplyPronunciations() {
@@ -541,7 +556,7 @@ func (b *Base) transformText(
 	return text, true
 }
 
-// SetSkipAggregatorTypes names the ways of grouping text whose units are not to
+// SetSkipTextTypes names the ways of grouping text whose units are not to
 // be spoken. A unit grouped that way is passed downstream unsynthesized, in its
 // place among the units around it, so a consumer recording the conversation
 // still sees it and only the audio is missing.
@@ -549,12 +564,19 @@ func (b *Base) transformText(
 // It is how a pattern-pair aggregator's own types are kept out of the speech: a
 // block of code cut out under a "code" type reads terribly aloud but still
 // belongs in the transcript.
-func (b *Base) SetSkipAggregatorTypes(types ...frames.AggregationType) {
+func (b *Base) SetSkipTextTypes(types ...frames.TextType) {
 	b.skipTypes = types
 }
 
+// SetSkipAggregatorTypes is the former name of SetSkipTextTypes.
+//
+// Deprecated: use SetSkipTextTypes.
+func (b *Base) SetSkipAggregatorTypes(types ...frames.TextType) {
+	b.SetSkipTextTypes(types...)
+}
+
 // skipsSynthesis reports whether units grouped this way are passed on unspoken.
-func (b *Base) skipsSynthesis(t frames.AggregationType) bool {
+func (b *Base) skipsSynthesis(t frames.TextType) bool {
 	return slices.Contains(b.skipTypes, t)
 }
 
@@ -965,7 +987,7 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	}
 	// A fixed utterance was never aggregated, so it stands as one sentence and
 	// the text is its own written form.
-	spoken := ttstext.Aggregation{Text: fr.Text, Type: frames.AggregationSentence}
+	spoken := ttstext.Aggregation{Text: fr.Text, Type: frames.TextTypeSentence}
 	if err := b.pushTTSFrames(ctx, spoken, interruptible); err != nil {
 		return err
 	}
@@ -1015,7 +1037,7 @@ func (b *Base) aggregate(ctx context.Context, text string) error {
 		return nil
 	}
 	for _, agg := range b.aggregator.Aggregate(text) {
-		if agg.Type != frames.AggregationToken {
+		if agg.Type != frames.TextTypeToken {
 			// The first sentence is complete, which is what the aggregation clock
 			// was waiting for. Later ones find it already stopped.
 			b.stopTextAggregationMetrics(ctx)
@@ -1301,7 +1323,7 @@ func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, inter
 // the frame announcing the unit, which the spoken text is reported as.
 func (b *Base) runTTS(
 	ctx context.Context, c *audioContext, contextID, original, prepared string,
-	by frames.AggregationType, segmentID uint64, appendToContext bool,
+	by frames.TextType, segmentID uint64, appendToContext bool,
 ) error {
 	// Every frame the provider yields is routed to its context, so audio and
 	// anything else it reports stay in the order it produced them.

@@ -503,11 +503,11 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 	// segment is the sentence it belongs to, and the words within it are
 	// reported as progress through that. An older client has no progress
 	// reports, so it is told about each one as output in its own right.
-	suppressed := !o.isLegacyClient() && (agg.AggregatedBy == frames.AggregationWord ||
-		agg.AggregatedBy == frames.AggregationToken)
+	suppressed := !o.isLegacyClient() && (agg.TextType == frames.TextTypeWord ||
+		agg.TextType == frames.TextTypeToken)
 
 	// Rewritten once, so the segment and the caption for it say the same thing.
-	text := o.transform(BotOutputText{Text: agg.Text, AggregatedBy: agg.AggregatedBy}).Text
+	text := o.transform(BotOutputText{Text: agg.Text, TextType: agg.TextType}).Text
 
 	// Text the synthesizer spoke for a segment is reported as that segment, so
 	// a client matches its completion to the announcement it already rendered.
@@ -521,7 +521,7 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 		spoken, willBeSpoken := seg.spoken, agg.WillBeSpoken
 		d := BotOutputData{
 			Text:         text,
-			AggregatedBy: agg.AggregatedBy,
+			AggregatedBy: agg.TextType,
 			SegmentID:    &id,
 			Spoken:       &spoken,
 			WillBeSpoken: &willBeSpoken,
@@ -558,7 +558,7 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 func (o *Observer) progressMessages(fr *frames.AggregatedTextProgressFrame) []Message {
 	// Progress through a skipped segment would give away the text the segment
 	// was skipped to keep from the client.
-	if o.skipsAggregation(fr.AggregatedBy) {
+	if o.skipsAggregation(fr.TextType) {
 		if fr.RemainingText == "" {
 			// The skipped segment's last word has been spoken.
 			o.skippedSegmentSpoken(fr.SegmentID)
@@ -570,11 +570,11 @@ func (o *Observer) progressMessages(fr *frames.AggregatedTextProgressFrame) []Me
 	}
 	// Rewritten as one, so the split stays consistent with the text it splits.
 	seg := o.transform(BotOutputText{
-		Text:         fr.Text,
-		AggregatedBy: fr.AggregatedBy,
-		Accumulated:  fr.AccumulatedText,
-		Remaining:    fr.RemainingText,
-		Progress:     true,
+		Text:        fr.Text,
+		TextType:    fr.TextType,
+		Accumulated: fr.AccumulatedText,
+		Remaining:   fr.RemainingText,
+		Progress:    true,
 	})
 
 	id, willBeSpoken := fr.SegmentID, true
@@ -584,7 +584,7 @@ func (o *Observer) progressMessages(fr *frames.AggregatedTextProgressFrame) []Me
 	}
 	return []Message{BotOutput(BotOutputData{
 		Text:         seg.Text,
-		AggregatedBy: fr.AggregatedBy,
+		AggregatedBy: fr.TextType,
 		SegmentID:    &id,
 		WillBeSpoken: &willBeSpoken,
 		SpokenStatus: status,

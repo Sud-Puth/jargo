@@ -118,7 +118,7 @@ func NewVoiceFormatter(opts FormatterOptions) (*VoiceFormatter, error) {
 // registered as one directly. It never fails: every transform it holds is a
 // plain rewrite of the text.
 func (f *VoiceFormatter) Transform(
-	_ context.Context, text string, _ frames.AggregationType,
+	_ context.Context, text string, _ frames.TextType,
 ) (string, error) {
 	for _, t := range f.transforms {
 		text = t(text)

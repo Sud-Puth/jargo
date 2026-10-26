@@ -22,7 +22,7 @@ type segmentObserver struct {
 
 func newSegmentObserver() *segmentObserver {
 	params := DefaultObserverParams()
-	params.SkipAggregatorTypes = []frames.AggregationType{"status"}
+	params.SkipTextTypes = []frames.TextType{"status"}
 	o := &segmentObserver{Observer: NewObserverWithParams(nil, params)}
 	o.botSpeaking = true
 	return o
@@ -55,7 +55,7 @@ func (o *segmentObserver) skippedIDs() []uint64 {
 
 // statusSegment is a segment the synthesizer will speak. All the segments of
 // one response share a synthesis context.
-func statusSegment(text string, by frames.AggregationType) *frames.AggregatedTextFrame {
+func statusSegment(text string, by frames.TextType) *frames.AggregatedTextFrame {
 	f := frames.NewAggregatedTextFrame(text, by)
 	f.ContextID = "turn"
 	f.WillBeSpoken = true
@@ -64,7 +64,7 @@ func statusSegment(text string, by frames.AggregationType) *frames.AggregatedTex
 
 // word is one word spoken in seg.
 func word(text string, seg *frames.AggregatedTextFrame) *frames.TTSTextFrame {
-	f := frames.NewTTSTextFrame(text, frames.AggregationWord)
+	f := frames.NewTTSTextFrame(text, frames.TextTypeWord)
 	f.ContextID = "turn"
 	f.SegmentID = seg.ID()
 	return f
@@ -72,7 +72,7 @@ func word(text string, seg *frames.AggregatedTextFrame) *frames.TTSTextFrame {
 
 // progress is how far through seg the bot has spoken.
 func progress(seg *frames.AggregatedTextFrame, accumulated, remaining string) *frames.AggregatedTextProgressFrame {
-	return frames.NewAggregatedTextProgressFrame(seg.ID(), "turn", seg.Text, seg.AggregatedBy, accumulated, remaining)
+	return frames.NewAggregatedTextProgressFrame(seg.ID(), "turn", seg.Text, seg.TextType, accumulated, remaining)
 }
 
 func TestASkippedSegmentKeepsItsProgressAndWordsFromTheClient(t *testing.T) {
@@ -90,7 +90,7 @@ func TestASkippedSegmentKeepsItsProgressAndWordsFromTheClient(t *testing.T) {
 func TestASegmentAfterASkippedOneIsSent(t *testing.T) {
 	o := newSegmentObserver()
 	status := statusSegment("One moment, please.", "status")
-	sentence := statusSegment("That sounds fun.", frames.AggregationSentence)
+	sentence := statusSegment("That sounds fun.", frames.TextTypeSentence)
 	o.push(status)
 	o.push(word("One", status))
 	o.push(sentence)
@@ -105,7 +105,7 @@ func TestWordsFollowTheirSegmentWhenTheSegmentsComeFirst(t *testing.T) {
 	// A turn's segments can all arrive before the first one is spoken.
 	o := newSegmentObserver()
 	status := statusSegment("One moment, please.", "status")
-	sentence := statusSegment("That sounds fun.", frames.AggregationSentence)
+	sentence := statusSegment("That sounds fun.", frames.TextTypeSentence)
 	o.push(status)
 	o.push(sentence)
 	o.push(word("One", status))

@@ -37,7 +37,7 @@ type Observer struct {
 	// queuedSegments are the segments waiting for the bot to start speaking.
 	queuedSegments []segment
 	// skippedSegmentIDs are the skipped segments whose spoken text may still
-	// come: the words a segment is spoken in carry their own aggregation type,
+	// come: the words a segment is spoken in carry their own text type,
 	// so they are recognized as part of a skipped segment by its id instead.
 	skippedSegmentIDs map[uint64]struct{}
 	// skippedSegmentsInterrupted is whether an interruption cut off the skipped
@@ -81,8 +81,8 @@ type Observer struct {
 type BotOutputText struct {
 	// Text is the whole segment.
 	Text string
-	// AggregatedBy is the unit the text stands for.
-	AggregatedBy frames.AggregationType
+	// TextType is the unit the text stands for.
+	TextType frames.TextType
 	// Accumulated is what has been spoken so far, the current word included.
 	Accumulated string
 	// Remaining is what has not been spoken yet.
@@ -101,11 +101,15 @@ type BotOutputText struct {
 // that only rewrites the whole text does not have to split it again.
 type BotOutputTransform func(seg BotOutputText) BotOutputText
 
-// BotOutputTransformer is one rewrite and the aggregation type it applies to.
+// BotOutputTransformer is one rewrite and the text type it applies to.
 type BotOutputTransformer struct {
-	// AggregatedBy is the aggregation type this rewrite applies to.
-	// frames.AnyAggregation applies it to every type.
-	AggregatedBy frames.AggregationType
+	// TextType is the text type this rewrite applies to. frames.AnyTextType
+	// applies it to every type.
+	TextType frames.TextType
+	// AggregatedBy is the former name of TextType, read when TextType is empty.
+	//
+	// Deprecated: use TextType.
+	AggregatedBy frames.TextType
 	// Transform rewrites the segment.
 	Transform BotOutputTransform
 }
@@ -178,19 +182,24 @@ type ObserverParams struct {
 	// leaves it on.
 	MetricsEnabled *bool
 	// BotOutputTransforms rewrite the bot's output on its way to the client,
-	// each registered against the aggregation type it applies to. They run in
+	// each registered against the text type it applies to. They run in
 	// the order given, each seeing what the last produced. More can be added and
 	// removed while the pipeline runs with AddBotOutputTransformer and
 	// RemoveBotOutputTransformer.
 	BotOutputTransforms []BotOutputTransformer
-	// SkipAggregatorTypes are the aggregation types not reported as bot output
+	// SkipTextTypes are the text types not reported as bot output
 	// or spoken text, and neither are the words a skipped segment is spoken in
 	// or the progress through it. It keeps a unit the bot produces but should not show from
 	// the client's view, a pattern-matched block carrying something private
 	// being the case for it. A client can still be told about it through the
 	// model's own text, so turn BotLLMEnabled off alongside this when that is
 	// what the list is for.
-	SkipAggregatorTypes []frames.AggregationType
+	SkipTextTypes []frames.TextType
+	// SkipAggregatorTypes is the former name of SkipTextTypes, read when
+	// SkipTextTypes is empty.
+	//
+	// Deprecated: use SkipTextTypes.
+	SkipAggregatorTypes []frames.TextType
 	// IgnoredSources are processors whose frames the observer says nothing
 	// about. It keeps a secondary branch of the pipeline out of the client's
 	// view: an evaluation model answering alongside the real one has a whole
@@ -254,6 +263,9 @@ func NewObserver(sink *Processor) *Observer {
 // NewObserverWithParams builds an observer that sends through sink and reports
 // what params allows.
 func NewObserverWithParams(sink *Processor, params ObserverParams) *Observer {
+	if len(params.SkipTextTypes) == 0 {
+		params.SkipTextTypes = params.SkipAggregatorTypes //nolint:staticcheck // the deprecated field is honored
+	}
 	o := &Observer{
 		sink:   sink,
 		params: params,
@@ -277,6 +289,9 @@ func (o *Observer) AddBotOutputTransformer(t BotOutputTransformer) TransformID {
 	o.transformMu.Lock()
 	defer o.transformMu.Unlock()
 	o.nextTransID++
+	if t.TextType == "" {
+		t.TextType = t.AggregatedBy //nolint:staticcheck // the deprecated field is honored
+	}
 	o.transforms = append(o.transforms, registeredTransform{id: o.nextTransID, BotOutputTransformer: t})
 	return o.nextTransID
 }
@@ -290,7 +305,7 @@ func (o *Observer) RemoveBotOutputTransformer(id TransformID) {
 		func(t registeredTransform) bool { return t.id == id })
 }
 
-// transform applies every rewrite registered for the segment's aggregation type,
+// transform applies every rewrite registered for the segment's text type,
 // in the order they were registered, each seeing what the last produced.
 func (o *Observer) transform(seg BotOutputText) BotOutputText {
 	o.transformMu.Lock()
@@ -298,7 +313,7 @@ func (o *Observer) transform(seg BotOutputText) BotOutputText {
 	o.transformMu.Unlock()
 
 	for _, t := range registered {
-		if t.AggregatedBy != seg.AggregatedBy && t.AggregatedBy != frames.AnyAggregation {
+		if t.TextType != seg.TextType && t.TextType != frames.AnyTextType {
 			continue
 		}
 		out := t.Transform(seg)
@@ -312,7 +327,7 @@ func (o *Observer) transform(seg BotOutputText) BotOutputText {
 				out.Remaining = seg.Remaining
 			}
 		}
-		out.AggregatedBy, out.Progress = seg.AggregatedBy, seg.Progress
+		out.TextType, out.Progress = seg.TextType, seg.Progress
 		seg = out
 	}
 	return seg
@@ -533,15 +548,15 @@ func (o *Observer) isLegacyClient() bool {
 }
 
 // skipsAggregation reports whether units aggregated this way are kept from the
-// client. See ObserverParams.SkipAggregatorTypes.
-func (o *Observer) skipsAggregation(by frames.AggregationType) bool {
+// client. See ObserverParams.SkipTextTypes.
+func (o *Observer) skipsAggregation(by frames.TextType) bool {
 	o.paramsMu.Lock()
 	defer o.paramsMu.Unlock()
-	return slices.Contains(o.params.SkipAggregatorTypes, by)
+	return slices.Contains(o.params.SkipTextTypes, by)
 }
 
 // isSkipped reports whether a segment is kept from the client, by its own
-// aggregation type or by that of the segment it was spoken in.
+// text type or by that of the segment it was spoken in.
 //
 // A skipped segment the synthesizer will speak is remembered, so the words it is
 // spoken in are skipped with it: they carry the word type rather than the
@@ -553,7 +568,7 @@ func (o *Observer) isSkipped(seg segment) bool {
 	}
 	o.outputMu.Lock()
 	defer o.outputMu.Unlock()
-	if o.skipsAggregation(seg.frame.AggregatedBy) {
+	if o.skipsAggregation(seg.frame.TextType) {
 		switch {
 		case segmentID != 0:
 			// The segment spoken in one piece: no words of it follow.

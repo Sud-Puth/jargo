@@ -684,7 +684,7 @@ func TestMaxBufferDelayDefault(t *testing.T) {
 		t.Errorf("aggregating sentences: max_buffer_delay_ms = %v, want 0", sentences.MaxBufferDelayMs)
 	}
 
-	tokens := ttsDefaults(Config{APIKey: "k", VoiceID: testVoiceID, TextAggregation: frames.AggregationToken})
+	tokens := ttsDefaults(Config{APIKey: "k", VoiceID: testVoiceID, TextAggregation: frames.TextTypeToken})
 	if tokens.MaxBufferDelayMs != nil {
 		t.Errorf("streaming tokens: max_buffer_delay_ms = %v, want it unset", *tokens.MaxBufferDelayMs)
 	}

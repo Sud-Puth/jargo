@@ -51,7 +51,7 @@ type parallelSentenceAggregator struct {
 // boundaries in the context's language.
 func newParallelSentenceAggregator(language string) *parallelSentenceAggregator {
 	return &parallelSentenceAggregator{
-		inner:   ttstext.NewSimpleAggregator(frames.AggregationSentence, language),
+		inner:   ttstext.NewSimpleAggregator(frames.TextTypeSentence, language),
 		aligned: true,
 	}
 }

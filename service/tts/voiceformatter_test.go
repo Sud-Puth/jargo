@@ -20,8 +20,8 @@ func TestVoiceFormatterRegistersAsATransform(t *testing.T) {
 
 	h := newTransformHarness(t, nil)
 	h.base.SetTextTransformers(tts.TextTransformer{
-		AggregatedBy: frames.AnyAggregation,
-		Transform:    f.Transform,
+		TextType:  frames.AnyTextType,
+		Transform: f.Transform,
 	})
 
 	h.runTurn(t, "The API costs $5.")
