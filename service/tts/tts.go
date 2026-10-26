@@ -1144,10 +1144,11 @@ func (b *Base) trimIncomingWhitespace(text string, streaming bool) (string, bool
 	return text, strings.TrimSpace(text) != ""
 }
 
-// keepsFilteredText reports whether what the filters left is still worth
-// speaking, and records that this context has now carried something. The same
-// question is asked again after the filters because a filter can strip a unit to
-// nothing of its own, and that has to be treated like text that arrived so.
+// keepsFilteredText reports whether what the filters and transforms left is
+// still worth speaking, and records that this context has now carried
+// something. The same question is asked again after them because a filter or a
+// transform can strip a unit to nothing of its own, and that has to be treated
+// like text that arrived so: a lone space is not sent to the synthesizer.
 func (b *Base) keepsFilteredText(text string, streaming bool) bool {
 	if !streaming {
 		return strings.TrimSpace(text) != ""
@@ -1232,7 +1233,13 @@ func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, inter
 		filtered = f.Filter(filtered)
 	}
 
-	if !b.keepsFilteredText(filtered, streaming) {
+	// Reshaped for the provider before anything is announced. A transform that
+	// fails, or that leaves nothing but whitespace, abandons the unit here,
+	// before it is announced or any audio is opened for it, so the turn carries
+	// on with this much unspoken rather than waiting on audio that is never
+	// coming.
+	transformed, ok := b.transformText(ctx, filtered, agg.Type)
+	if !ok || !b.keepsFilteredText(transformed, streaming) {
 		return nil
 	}
 	aggregated := b.aggregatedFrame(agg, contextID)
@@ -1256,15 +1263,6 @@ func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, inter
 		_ = b.queueSerial(ctx, aggregated, processor.Downstream)
 	} else {
 		b.AppendToAudioContext(contextID, aggregated)
-	}
-
-	// Announced, then reshaped for the provider. A transform that fails
-	// abandons the unit here, before any audio is opened for it, so the turn
-	// carries on with this much unspoken rather than waiting on audio that is
-	// never coming.
-	transformed, ok := b.transformText(ctx, filtered, agg.Type)
-	if !ok {
-		return nil
 	}
 
 	// Recorded before the context opens, so the drain loop has the answers in

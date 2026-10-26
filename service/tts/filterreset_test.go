@@ -47,3 +47,43 @@ func TestFilterStateDoesNotCarryIntoTheNextReply(t *testing.T) {
 		}
 	}
 }
+
+// TestATransformLeavingOnlyWhitespaceLeavesTheTextUnspoken checks a transform
+// whose output is only whitespace drops the unit, rather than sending a lone
+// space to the synthesizer, and that the sentences around it are still spoken.
+func TestATransformLeavingOnlyWhitespaceLeavesTheTextUnspoken(t *testing.T) {
+	syn := &fakeSynth{rate: 24000, chunk: []byte{1, 2, 3, 4}, spoken: make(chan string, 8)}
+	base := tts.New("TransformTTS", syn)
+	base.AddTextTransformer(tts.TextTransformer{
+		AggregatedBy: frames.AnyAggregation,
+		Transform: func(_ context.Context, text string, _ frames.AggregationType) (string, error) {
+			if text == "Skip me." {
+				return " ", nil
+			}
+			return text, nil
+		},
+	})
+
+	task := pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{})
+	done := make(chan error, 1)
+	go func() { done <- task.Run(context.Background()) }()
+	t.Cleanup(func() {
+		task.Cancel(context.Background(), "")
+		<-done
+	})
+
+	for _, text := range []string{"Skip me.", "Say this."} {
+		task.QueueFrame(frames.NewLLMFullResponseStartFrame())
+		task.QueueFrame(frames.NewLLMTextFrame(text))
+		task.QueueFrame(frames.NewLLMFullResponseEndFrame())
+	}
+
+	select {
+	case text := <-syn.spoken:
+		if text != "Say this." {
+			t.Errorf("first text synthesized = %q, want %q", text, "Say this.")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing was synthesized")
+	}
+}
