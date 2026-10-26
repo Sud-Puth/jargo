@@ -177,6 +177,146 @@ func (f *FunctionCallCancelFrame) String() string {
 	return fmt.Sprintf("%s(%s)", f.Name(), f.ToolName)
 }
 
+// ExternalFunctionCall is a function call made outside this pipeline, as
+// announced to it: what an ExternalFunctionCallsStartedFrame carries, one per
+// call.
+type ExternalFunctionCall struct {
+	// ToolName is the name of the function called.
+	ToolName string
+	// ToolCallID identifies the call.
+	ToolCallID string
+}
+
+// ExternalFunctionCallsStartedFrame reports function calls made outside this
+// pipeline: FunctionCallsStartedFrame's counterpart.
+//
+// Nothing in the pipeline acts on one; observers report it as they report the
+// pipeline's own. The calls ran elsewhere, in a backend worker's pipeline on
+// behalf of a tool here say, and belong to that pipeline's conversation, not this
+// one. Like its counterpart it carries every call announced together, which may
+// be one. Each call's later phases come as an ExternalFunctionCallInProgressFrame,
+// an ExternalFunctionCallResultFrame and an ExternalFunctionCallCancelFrame.
+type ExternalFunctionCallsStartedFrame struct {
+	BaseSystemFrame
+	// Calls are the calls made.
+	Calls []ExternalFunctionCall
+}
+
+// NewExternalFunctionCallsStartedFrame builds an
+// ExternalFunctionCallsStartedFrame.
+func NewExternalFunctionCallsStartedFrame(calls []ExternalFunctionCall) *ExternalFunctionCallsStartedFrame {
+	return &ExternalFunctionCallsStartedFrame{
+		BaseSystemFrame: NewBaseSystemFrame("ExternalFunctionCallsStartedFrame"),
+		Calls:           calls,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *ExternalFunctionCallsStartedFrame) String() string {
+	return fmt.Sprintf("%s(calls: %d)", f.Name(), len(f.Calls))
+}
+
+// ExternalFunctionCallInProgressFrame reports an external function call is
+// running: FunctionCallInProgressFrame's counterpart.
+//
+// Nothing in the pipeline acts on one; observers report it as they report the
+// pipeline's own. The call ran elsewhere and belongs to that pipeline's
+// conversation, not this one.
+type ExternalFunctionCallInProgressFrame struct {
+	BaseSystemFrame
+	// ToolCallID identifies the call.
+	ToolCallID string
+	// ToolName is the name of the function called.
+	ToolName string
+	// Args is the raw JSON arguments passed to the function.
+	Args json.RawMessage
+}
+
+// NewExternalFunctionCallInProgressFrame builds an
+// ExternalFunctionCallInProgressFrame.
+func NewExternalFunctionCallInProgressFrame(
+	toolCallID, name string, args json.RawMessage,
+) *ExternalFunctionCallInProgressFrame {
+	return &ExternalFunctionCallInProgressFrame{
+		BaseSystemFrame: NewBaseSystemFrame("ExternalFunctionCallInProgressFrame"),
+		ToolCallID:      toolCallID,
+		ToolName:        name,
+		Args:            args,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *ExternalFunctionCallInProgressFrame) String() string {
+	return fmt.Sprintf("%s(%s)", f.Name(), f.ToolName)
+}
+
+// ExternalFunctionCallResultFrame reports an external function call produced a
+// result: FunctionCallResultFrame's counterpart.
+//
+// Nothing in the pipeline acts on one; observers report it as they report the
+// pipeline's own.
+type ExternalFunctionCallResultFrame struct {
+	BaseSystemFrame
+	// ToolCallID identifies the call.
+	ToolCallID string
+	// ToolName is the name of the function called.
+	ToolName string
+	// Args is the raw JSON arguments passed to the function.
+	Args json.RawMessage
+	// Result is the result.
+	Result string
+	// IsFinal reports whether this result completes the call, rather than being
+	// one of a stream of intermediate results before the final one.
+	IsFinal bool
+}
+
+// NewExternalFunctionCallResultFrame builds an ExternalFunctionCallResultFrame
+// for a final result.
+func NewExternalFunctionCallResultFrame(
+	toolCallID, name string, args json.RawMessage, result string,
+) *ExternalFunctionCallResultFrame {
+	return &ExternalFunctionCallResultFrame{
+		BaseSystemFrame: NewBaseSystemFrame("ExternalFunctionCallResultFrame"),
+		ToolCallID:      toolCallID,
+		ToolName:        name,
+		Args:            args,
+		Result:          result,
+		IsFinal:         true,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *ExternalFunctionCallResultFrame) String() string {
+	return fmt.Sprintf("%s(%s)", f.Name(), f.ToolName)
+}
+
+// ExternalFunctionCallCancelFrame reports an external function call was
+// canceled: FunctionCallCancelFrame's counterpart.
+//
+// Nothing in the pipeline acts on one; observers report it as they report the
+// pipeline's own.
+type ExternalFunctionCallCancelFrame struct {
+	BaseSystemFrame
+	// ToolCallID identifies the call.
+	ToolCallID string
+	// ToolName is the name of the function called.
+	ToolName string
+}
+
+// NewExternalFunctionCallCancelFrame builds an ExternalFunctionCallCancelFrame.
+func NewExternalFunctionCallCancelFrame(toolCallID, name string) *ExternalFunctionCallCancelFrame {
+	return &ExternalFunctionCallCancelFrame{
+		BaseSystemFrame: NewBaseSystemFrame("ExternalFunctionCallCancelFrame"),
+		ToolCallID:      toolCallID,
+		ToolName:        name,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *ExternalFunctionCallCancelFrame) String() string {
+	return fmt.Sprintf("%s(%s)", f.Name(), f.ToolName)
+}
+
 // Compile-time interface checks.
 var (
 	_ SystemFrame     = (*FunctionCallsStartedFrame)(nil)
@@ -185,4 +325,8 @@ var (
 	_ DataFrame       = (*FunctionCallResultFrame)(nil)
 	_ Uninterruptible = (*FunctionCallResultFrame)(nil)
 	_ SystemFrame     = (*FunctionCallCancelFrame)(nil)
+	_ SystemFrame     = (*ExternalFunctionCallsStartedFrame)(nil)
+	_ SystemFrame     = (*ExternalFunctionCallInProgressFrame)(nil)
+	_ SystemFrame     = (*ExternalFunctionCallResultFrame)(nil)
+	_ SystemFrame     = (*ExternalFunctionCallCancelFrame)(nil)
 )

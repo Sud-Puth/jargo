@@ -264,6 +264,39 @@ func (o *Observer) functionCallMessagesFor(f frames.Frame) ([]Message, bool) {
 			return LLMFunctionCallStopped(fr.ToolName, fr.ToolCallID, "", true, level)
 		})
 	default:
+		return o.externalFunctionCallMessagesFor(f)
+	}
+}
+
+// externalFunctionCallMessagesFor maps a frame reporting a call made outside
+// this pipeline, in a backend worker's say, to its messages. Such calls are
+// reported as the pipeline's own are, at the level of their own function.
+func (o *Observer) externalFunctionCallMessagesFor(f frames.Frame) ([]Message, bool) {
+	switch fr := f.(type) {
+	case *frames.ExternalFunctionCallsStartedFrame:
+		var msgs []Message
+		for _, call := range fr.Calls {
+			if level := o.reportLevelFor(call.ToolName); level != ReportDisabled {
+				msgs = append(msgs, LLMFunctionCallStart(call.ToolName, level))
+			}
+		}
+		return msgs, true
+	case *frames.ExternalFunctionCallInProgressFrame:
+		return o.callMessage(fr.ToolName, func(level FunctionCallReportLevel) Message {
+			return LLMFunctionCall(fr.ToolName, fr.ToolCallID, fr.Args, level)
+		})
+	case *frames.ExternalFunctionCallResultFrame:
+		if !fr.IsFinal {
+			return nil, true
+		}
+		return o.callMessage(fr.ToolName, func(level FunctionCallReportLevel) Message {
+			return LLMFunctionCallStopped(fr.ToolName, fr.ToolCallID, fr.Result, false, level)
+		})
+	case *frames.ExternalFunctionCallCancelFrame:
+		return o.callMessage(fr.ToolName, func(level FunctionCallReportLevel) Message {
+			return LLMFunctionCallStopped(fr.ToolName, fr.ToolCallID, "", true, level)
+		})
+	default:
 		return nil, false
 	}
 }
