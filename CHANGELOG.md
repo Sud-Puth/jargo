@@ -15,6 +15,61 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Backchannels, for the user and for the bot.** A backchannel is a short
+  acknowledgment said while the other side talks, which neither interrupts it
+  nor joins the conversation. `frames.UserBackchannelFrame` is what the user
+  said, such as "mhm", pushed in place of a transcription so the bot keeps
+  talking; the user aggregator reports it with `on_user_backchannel` and drops
+  it while the user is muted. `frames.BotBackchannelFrame` is a
+  `TTSSpeakFrame` for the bot to say while the user talks: its text has the
+  new type `frames.TextTypeBackchannel`, it stays out of the LLM context, and
+  interruptions do not cut it off unless it is made interruptible. The
+  assistant aggregator reports it with `on_assistant_backchannel`. RTVI sends
+  bot backchannels as `bot-output` only to clients of protocol 2.2.0 or later,
+  which would otherwise show one as part of the bot's response.
+
+- **RTVI `user-input`: what the user said or typed.** The observer sends it for
+  each transcription (interim ones included), each user backchannel, and the
+  text a client sent with `send-text`, acknowledged with its message id and,
+  when the transport knows it, its sender. It is on by default
+  (`ObserverParams.UserInputEnabled`). The processor pushes an
+  `rtvi.SendTextFrame` after the text it appends to the context.
+  `InputTransportMessageFrame` gained `ParticipantID`, `BaseInput` gained
+  `PushParticipantMessage`, and the LiveKit transport passes on each data
+  packet's sender. **Breaking:** the handler given to
+  `livekit.Connection.OnMessage` receives the sender as a second argument.
+
+- **RTVI raw text messages.** `stt-raw-text` reports each transcription as the
+  STT produced it, `llm-raw-text` each chunk of text the LLM streams, and
+  `tts-raw-text` the text the TTS speaks, leaving out the same text types as
+  `bot-output`. Each is off by default (`ObserverParams.STTRawTextEnabled`,
+  `LLMRawTextEnabled`, `TTSRawTextEnabled`) and only sent to clients of
+  protocol 2.2.0 or later.
+
+- **The bot's capabilities in RTVI `bot-ready`.** It carries `capabilities`:
+  `audio_in`, `audio_out`, `video_in`, `screen_in`, `video_out` and `metrics`,
+  so a client can show only the UI that applies. The new `pipeline/capabilities`
+  package holds `BotCapabilities`; `Worker.Capabilities` derives it from the
+  pipeline's transports (`BaseInput.Capabilities`, `BaseOutput.Capabilities`)
+  and `Params.EnableMetrics`, with `WorkerConfig.Capabilities` applied on top.
+  A field nobody knows is left out. **Breaking:** `processor.Running` gained a
+  `Capabilities` method.
+
+- **RTVI `bot-output` says what kind of text it holds as `output_type`.** The
+  same value is still sent as `text_type` and `aggregated_by` for the clients
+  reading those. `rtvi.BotOutputData` gained `OutputType`.
+
+- **A `TTSSpeakFrame` says what kind of text it speaks.** `TTSSpeakFrame`
+  gained `TextType`, a sentence by default, carried by the text frames the TTS
+  service pushes for it, so a custom type such as "status" can be told apart
+  from the bot's replies and kept from the client with
+  `ObserverParams.SkipTextTypes`.
+
+- **Each user turn written to the conversation is announced.** The user
+  aggregator broadcasts a `frames.LLMContextUserTurnFrame` each time it writes
+  what the user said to the conversation, the user's side of
+  `LLMContextAssistantTurnFrame`.
+
 - **Observers can release what they hold.** An observer implementing
   `processor.CleanupObserver` is cleaned up once the pipeline worker stops
   reporting to it, and when it is removed while the pipeline runs. Cleaning up
@@ -161,6 +216,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   last, so nothing rewrites the markup it inserts.
 
 ### Changed
+
+- **What kind of text a frame holds is its `TextType`.** `frames.AggregationType`
+  is now `frames.TextType`, with `TextTypeSentence`, `TextTypeToken`,
+  `TextTypeWord` and `AnyTextType`, since a `TTSSpeakFrame` or a backchannel
+  says what its text is without aggregating anything. **Breaking:**
+  `AggregatedTextFrame.AggregatedBy` and `AggregatedTextProgressFrame.AggregatedBy`
+  are now `TextType`. The other former names stay as deprecated aliases.
 
 - **Pausing a TTS service waits for its audio contexts, not the bot.** With
   `PauseOptions.Enabled`, the service holds frames after a reply, or after a
@@ -422,6 +484,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Deprecated
 
+- **`AggregationType` and the names built on it.** `frames.AggregationType`
+  and its constants, `tts.Base.SetSkipAggregatorTypes`,
+  `rtvi.ObserverParams.SkipAggregatorTypes`, the `AggregatedBy` fields of
+  `TextTransformer` and `BotOutputTransformer`, and
+  `text.ErrReservedAggregationType`. Use the `TextType` names.
+
+- **RTVI `user-transcription`, `bot-llm-text` and `bot-tts-text`.** Read
+  `user-input` and `stt-raw-text`, `llm-raw-text`, and `tts-raw-text` instead.
+  They are still sent, each after its replacement.
+  `ObserverParams.UserTranscriptionEnabled` is deprecated with the message it
+  turns off, and `bot-output`'s `text_type` and `aggregated_by` in favor of
+  `output_type`.
+
 - **`perplexity.NewLLM`.** Perplexity has ended support for the Sonar chat
   completions API it uses. Use `perplexity.NewAgentLLM` instead.
 
@@ -437,6 +512,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   replacement: choose another TTS provider.
 
 ### Fixed
+
+- **A reply that skips TTS reaches the client as `bot-output`.** One sent with
+  `audio_response` false never did: the TTS service passed its LLM text through
+  raw. It now cuts that text into sentences and pushes each as an
+  `AggregatedTextFrame` marked `SkipTTS`, queued behind the audio still
+  playing. Processors after the TTS service get these frames for such a reply
+  instead of its `LLMTextFrame`s.
+
+- **Text left out of speech is sent to the client at once.** The RTVI observer
+  held it until the bot next spoke, so a text-only reply could wait for the
+  next spoken one or never go out. `bot-output` for text that is not spoken
+  now says `spoken_status` "new".
+
+- **An interruption drops the `bot-output` of the speech it cut off.** It was
+  sent with the bot's next speech. Uninterruptible speech, whose audio still
+  plays, keeps its output.
+
+- **A sentence promoted from streamed tokens keeps its text type.** A
+  `TTSSpeakFrame` of a custom type, spoken by a service streaming tokens, came
+  out as a sentence.
 
 - **A WebSocket send to a peer that stopped reading is bounded.** It waited on
   the full write buffer until TCP gave up, holding up the service and every
