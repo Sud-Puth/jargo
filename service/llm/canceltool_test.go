@@ -446,3 +446,62 @@ func TestTheCancelToolSchemaHoldsAnAwkwardName(t *testing.T) {
 		t.Errorf("properties = %v, want only the tool_call_id", schema.Properties)
 	}
 }
+
+// TestCancelFunctionCallsStopsEveryCallInFlight checks every running call is
+// canceled, an asynchronous one included, which an interruption leaves running.
+func TestCancelFunctionCallsStopsEveryCallInFlight(t *testing.T) {
+	gen := &scriptedGen{turns: [][]frames.ToolCall{{
+		{ID: "call-1", Name: "write_report", Args: json.RawMessage(`{}`)},
+		{ID: "call-2", Name: "lookup", Args: json.RawMessage(`{}`)},
+	}}}
+	svc := llm.New("FakeLLM", gen)
+
+	started := make(chan struct{}, 2)
+	stopped := make(chan string, 2)
+	blocking := func(ctx context.Context, p llm.FunctionCallParams) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		stopped <- p.ToolCallID
+		return nil
+	}
+	svc.RegisterFunction("write_report", blocking, llm.WithCancelOnInterruption(false))
+	svc.RegisterFunction("lookup", blocking)
+
+	task := pipeline.NewWorker(pipeline.New(svc), pipeline.WorkerConfig{})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+	defer func() {
+		task.Cancel(context.Background(), "")
+		<-runDone
+	}()
+
+	convo := toolConvo("write_report")
+	convo.SetTools(append(convo.Tools(), frames.Tool{
+		Name: "lookup", Description: "a tool", Parameters: json.RawMessage(`{"type":"object"}`),
+	}))
+	task.QueueFrame(frames.NewLLMContextFrame(convo))
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatal("a call the test needs running never started")
+		}
+	}
+
+	canceled := svc.CancelFunctionCalls(context.Background(), "test")
+
+	ids := make([]string, 0, len(canceled))
+	for _, c := range canceled {
+		ids = append(ids, c.ID)
+	}
+	if want := []string{"call-1", "call-2"}; !slices.Equal(ids, want) {
+		t.Errorf("canceled %v, want %v", ids, want)
+	}
+	for range 2 {
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+			t.Fatal("a handler was never told it was canceled")
+		}
+	}
+}

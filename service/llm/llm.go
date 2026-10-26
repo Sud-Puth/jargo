@@ -1783,6 +1783,48 @@ func (b *Base) handleInterruptions(ctx context.Context) {
 	}
 }
 
+// CancelFunctionCalls cancels every function call in flight, whether or not it
+// survives interruptions, and returns the calls it canceled.
+//
+// Each handler's context is canceled, the call is settled downstream as
+// canceled, and OnFunctionCallsCanceled is told. No inference runs for the
+// cancellations. reason is what triggered them, for the logs.
+//
+// An interruption cancels only the calls registered to be canceled by one; this
+// is how a caller lets go of the asynchronous ones too, when whoever asked for
+// the work has gone.
+func (b *Base) CancelFunctionCalls(ctx context.Context, reason string) []frames.ToolCall {
+	return b.cancelFunctionCallTasks(ctx, func(*functionCall) bool { return true }, reason, false)
+}
+
+// LLMWithBackendRole is a role a service can fill in a pairing of a
+// conversational frontend with a backend that does the work it hands off.
+type LLMWithBackendRole string
+
+// The roles of a pairing.
+const (
+	// RoleFrontend is the conversational LLM, which holds the conversation.
+	RoleFrontend LLMWithBackendRole = "frontend"
+	// RoleBackend is the LLM inside the backend worker.
+	RoleBackend LLMWithBackendRole = "backend"
+)
+
+// LLMWithBackendRoleObjector is implemented by a service that can say why it
+// cannot take a role in a pairing. *Base implements it, saying nothing.
+type LLMWithBackendRoleObjector interface {
+	// LLMWithBackendRoleObjection says why the service cannot take role, or ""
+	// when it can.
+	LLMWithBackendRoleObjection(role LLMWithBackendRole) string
+}
+
+// LLMWithBackendRoleObjection says why this service cannot take the given role
+// in a pairing of a frontend with a backend, or "" when it can.
+//
+// The pairing refuses the service with what this returns, so the objection says
+// what to do instead. Services that work in both roles, which is nearly all of
+// them, say nothing; a service that cannot fill one overrides this.
+func (b *Base) LLMWithBackendRoleObjection(LLMWithBackendRole) string { return "" }
+
 // cancelFunctionCallTasks cancels the calls in flight that match, and returns
 // them. Each handler's context is canceled so a cancel-aware handler runs its
 // cleanup, a FunctionCallCancelFrame is broadcast so the rest of the pipeline
