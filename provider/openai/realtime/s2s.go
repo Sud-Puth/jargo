@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	realtimeadapter "github.com/gojargo/jargo/adapter/realtime"
+	"github.com/gojargo/jargo/audio/resample"
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/processor/turns"
@@ -63,6 +64,14 @@ type Service struct {
 	audioResp *audioResponse
 
 	connector Connector
+
+	// inRS converts input audio to the session's fixed 24 kHz, and inRate and
+	// inChannels are the format it was built for: it is rebuilt when the input
+	// format changes. Guarded by inMu.
+	inMu       sync.Mutex
+	inRS       *resample.Resampler
+	inRate     int
+	inChannels int
 }
 
 // audioResponse tracks the assistant audio item the session is playing: which
@@ -163,7 +172,7 @@ func (s *Service) ProcessFrame(ctx context.Context, f frames.Frame, dir processo
 		if err := s.Base.Base.ProcessFrame(ctx, f, dir); err != nil {
 			return err
 		}
-		s.sendAudio(audio.Audio)
+		s.sendAudio(*audio)
 		return nil
 	}
 	if err := s.Base.ProcessFrame(ctx, f, dir); err != nil {
@@ -210,6 +219,7 @@ func (s *Service) ProcessFrame(ctx context.Context, f frames.Frame, dir processo
 // Cleanup tears down the session and stops the read loop.
 func (s *Service) Cleanup(ctx context.Context) error {
 	s.disconnect()
+	s.closeResampler()
 	return s.Base.Cleanup(ctx)
 }
 
@@ -471,8 +481,11 @@ func sameTools(a, b frames.ToolsSchema) bool {
 	return true
 }
 
-// sendAudio appends a chunk of input PCM to the model's input buffer.
-func (s *Service) sendAudio(pcm []byte) {
+// sendAudio appends a chunk of input PCM to the model's input buffer. The
+// session's input format is PCM at a fixed 24 kHz, so audio at any other rate
+// is resampled first.
+func (s *Service) sendAudio(audio frames.AudioRawData) {
+	pcm := s.toSessionRate(audio)
 	if len(pcm) == 0 {
 		return
 	}
@@ -480,6 +493,38 @@ func (s *Service) sendAudio(pcm []byte) {
 		Type:  "input_audio_buffer.append",
 		Audio: base64.StdEncoding.EncodeToString(pcm),
 	})
+}
+
+// toSessionRate converts input audio to the session's rate.
+func (s *Service) toSessionRate(audio frames.AudioRawData) []byte {
+	if audio.SampleRate == sampleRate || audio.SampleRate <= 0 {
+		return audio.Audio
+	}
+	channels := max(audio.NumChannels, 1)
+	s.inMu.Lock()
+	defer s.inMu.Unlock()
+	if s.inRS == nil || s.inRate != audio.SampleRate || s.inChannels != channels {
+		if s.inRS != nil {
+			s.inRS.Close()
+		}
+		rs, err := resample.New(audio.SampleRate, sampleRate, channels)
+		if err != nil {
+			s.inRS = nil
+			return nil
+		}
+		s.inRS, s.inRate, s.inChannels = rs, audio.SampleRate, channels
+	}
+	return s.inRS.Process(audio.Audio)
+}
+
+// closeResampler releases the input resampler.
+func (s *Service) closeResampler() {
+	s.inMu.Lock()
+	defer s.inMu.Unlock()
+	if s.inRS != nil {
+		s.inRS.Close()
+		s.inRS = nil
+	}
 }
 
 // send marshals v and writes it as a text frame, serializing concurrent writes.

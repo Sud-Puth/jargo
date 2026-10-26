@@ -5,10 +5,9 @@
 // voice-activity events back down.
 //
 // Place the service where the STT/LLM/TTS stack would go, between the transport
-// input and output. The Realtime API exchanges 16-bit mono PCM at 24 kHz, so run
-// the pipeline at that rate (set the transport's input and output sample rates
-// to 24000); audio at other rates is sent through unchanged and will sound
-// wrong.
+// input and output. The Realtime API exchanges 16-bit mono PCM at 24 kHz: input
+// audio at any other rate is resampled to it before it is sent, and the model's
+// audio comes out at 24 kHz.
 //
 // The model's server VAD drives turn-taking: on detected user speech the service
 // emits an InterruptionFrame (barge-in) so the output transport drops buffered
