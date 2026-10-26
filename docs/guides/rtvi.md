@@ -66,6 +66,7 @@ whether to carry on. `Processor.ClientVersion` reports what the client declared.
 |---|---|
 | `client-ready` → `bot-ready` | The handshake. |
 | `user-transcription` | What the user said (interim and final). |
+| `user-input` | What the user said or typed: transcriptions (interim and final), backchannels, and the text sent with `send-text`, acknowledged with its id and, when the transport knows, its sender. |
 | `bot-transcription` | What the bot said. |
 | `bot-llm-text` / `bot-tts-text` | Streamed response text, per stage. |
 | `user-started-speaking` / `user-stopped-speaking` | Turn boundaries. |

@@ -170,6 +170,10 @@ type ObserverParams struct {
 	// UserTranscriptionEnabled reports what the user said, both the interim
 	// guesses and the final transcript. Nil leaves it on.
 	UserTranscriptionEnabled *bool
+	// UserInputEnabled reports what the user said or typed: transcriptions,
+	// interim ones included, backchannels, and the text the client sent. Nil
+	// leaves it on.
+	UserInputEnabled *bool
 	// UserLLMEnabled reports the user's message as the model is about to read
 	// it, which is what was actually put to the model rather than what the
 	// transcription service heard. Nil leaves it on.
@@ -547,9 +551,31 @@ func (o *Observer) isLegacyClient() bool {
 	return o.sink.ClientVersion()[0] == LegacySupportedMajor
 }
 
-// skipsAggregation reports whether units aggregated this way are kept from the
-// client. See ObserverParams.SkipTextTypes.
+// clientIsAtLeast reports whether the connected client speaks version or a
+// later one. With no processor to have negotiated a version, the current
+// protocol is assumed, as isLegacyClient does.
+func (o *Observer) clientIsAtLeast(version [3]int) bool {
+	if o.sink == nil {
+		return true
+	}
+	client := o.sink.ClientVersion()
+	return slices.Compare(client[:], version[:]) >= 0
+}
+
+// clientSupportsBackchannels reports whether the connected client knows the
+// backchannel text type, which came with protocol 2.2.0.
+func (o *Observer) clientSupportsBackchannels() bool {
+	return o.clientIsAtLeast([3]int{2, 2, 0})
+}
+
+// skipsAggregation reports whether text of this type is kept from bot output
+// and the spoken text messages.
 func (o *Observer) skipsAggregation(by frames.TextType) bool {
+	// A client that does not support backchannels would show one as part of
+	// the bot's response.
+	if by == frames.TextTypeBackchannel && !o.clientSupportsBackchannels() {
+		return true
+	}
 	o.paramsMu.Lock()
 	defer o.paramsMu.Unlock()
 	return slices.Contains(o.params.SkipTextTypes, by)

@@ -175,3 +175,120 @@ func TestASkippedSegmentSpokenInOnePieceIsForgotten(t *testing.T) {
 		t.Fatalf("still remembering %v after the segment was spoken", got)
 	}
 }
+
+// connectClient stands in for a processor a client negotiated version with.
+func (o *segmentObserver) connectClient(version [3]int) {
+	sink := NewProcessor()
+	sink.clientVersion = version
+	o.sink = sink
+}
+
+// types is the type of every message sent.
+func (o *segmentObserver) types() []string {
+	out := make([]string, 0, len(o.sent))
+	for _, m := range o.sent {
+		out = append(out, m.Type)
+	}
+	return out
+}
+
+// outputs is the data of every bot-output message sent.
+func (o *segmentObserver) outputs() []BotOutputData {
+	var out []BotOutputData
+	for _, m := range o.sent {
+		if d, ok := m.Data.(BotOutputData); ok {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func TestABackchannelIsSentAsOutputAndTTSText(t *testing.T) {
+	o := newSegmentObserver()
+	backchannel := statusSegment("Mm-hmm, go on.", frames.TextTypeBackchannel)
+	o.push(backchannel)
+	o.push(word("Mm-hmm,", backchannel))
+	o.push(progress(backchannel, "Mm-hmm,", " go on."))
+
+	if got, want := o.types(), []string{TypeBotOutput, TypeBotTTSText, TypeBotOutput}; !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+	outs := o.outputs()
+	if outs[0].OutputType != frames.TextTypeBackchannel || outs[0].SpokenStatus != SpokenNew ||
+		outs[1].OutputType != frames.TextTypeBackchannel || outs[1].SpokenStatus != SpokenInProgress {
+		t.Errorf("outputs %+v, want the backchannel new then in progress", outs)
+	}
+	if d, ok := o.sent[1].Data.(TextData); !ok || d.Text != "Mm-hmm," {
+		t.Errorf("tts text %+v, want the word spoken", o.sent[1].Data)
+	}
+}
+
+func TestABackchannelSpokenInOnePieceIsSentAsOutputAndTTSText(t *testing.T) {
+	o := newSegmentObserver()
+	backchannel := statusSegment("Mm-hmm.", frames.TextTypeBackchannel)
+	spoken := frames.NewTTSTextFrame(backchannel.Text, frames.TextTypeBackchannel)
+	spoken.SegmentID = backchannel.ID()
+	spoken.WillBeSpoken = true
+	o.push(backchannel)
+	o.push(spoken)
+
+	if got, want := o.types(), []string{TypeBotOutput, TypeBotOutput, TypeBotTTSText}; !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+	outs := o.outputs()
+	if outs[0].SpokenStatus != SpokenNew || outs[1].SpokenStatus != SpokenCompleted {
+		t.Errorf("outputs %+v, want the backchannel new then completed", outs)
+	}
+}
+
+func TestABackchannelIsKeptFromOlderClients(t *testing.T) {
+	for _, version := range [][3]int{{2, 1, 0}, {1, 4, 0}} {
+		o := newSegmentObserver()
+		o.connectClient(version)
+		backchannel := statusSegment("Mm-hmm, go on.", frames.TextTypeBackchannel)
+		o.push(backchannel)
+		o.push(word("Mm-hmm,", backchannel))
+		o.push(progress(backchannel, "Mm-hmm,", " go on."))
+		o.push(progress(backchannel, "Mm-hmm, go on.", ""))
+
+		if len(o.sent) != 0 {
+			t.Errorf("%v: sent %+v, want nothing of a backchannel", version, o.sent)
+		}
+		if got := o.skippedIDs(); len(got) != 0 {
+			t.Errorf("%v: still remembering %v after the backchannel was spoken", version, got)
+		}
+	}
+}
+
+func TestABackchannelSpokenInOnePieceIsKeptFromOlderClients(t *testing.T) {
+	o := newSegmentObserver()
+	o.connectClient([3]int{2, 1, 0})
+	backchannel := statusSegment("Mm-hmm.", frames.TextTypeBackchannel)
+	spoken := frames.NewTTSTextFrame(backchannel.Text, frames.TextTypeBackchannel)
+	spoken.SegmentID = backchannel.ID()
+	spoken.WillBeSpoken = true
+	o.push(backchannel)
+	o.push(spoken)
+
+	if len(o.sent) != 0 {
+		t.Fatalf("sent %+v, want nothing of a backchannel", o.sent)
+	}
+	if got := o.skippedIDs(); len(got) != 0 {
+		t.Fatalf("still remembering %v after the backchannel was spoken", got)
+	}
+}
+
+func TestASegmentAfterABackchannelIsSentToOlderClients(t *testing.T) {
+	o := newSegmentObserver()
+	o.connectClient([3]int{2, 1, 0})
+	backchannel := statusSegment("Mm-hmm.", frames.TextTypeBackchannel)
+	sentence := statusSegment("That sounds fun.", frames.TextTypeSentence)
+	o.push(backchannel)
+	o.push(word("Mm-hmm.", backchannel))
+	o.push(sentence)
+	o.push(word("That", sentence))
+
+	if got, want := o.texts(), []string{"That sounds fun.", "That"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %q, want %q", got, want)
+	}
+}

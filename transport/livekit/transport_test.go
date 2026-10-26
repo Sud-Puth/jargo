@@ -122,18 +122,24 @@ func TestDone(t *testing.T) {
 func TestOnMessageDeliversWhatArrivedFirst(t *testing.T) {
 	c := &Connection{}
 
-	c.deliver([]byte("first"))
-	c.deliver([]byte("second"))
+	c.deliver([]byte("first"), "alice")
+	c.deliver([]byte("second"), "")
 
-	var got []string
-	c.OnMessage(func(b []byte) { got = append(got, string(b)) })
+	var got, senders []string
+	c.OnMessage(func(b []byte, sender string) {
+		got = append(got, string(b))
+		senders = append(senders, sender)
+	})
 	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
 		t.Fatalf("messages held before a handler = %v, want both in order", got)
 	}
+	if senders[0] != "alice" || senders[1] != "" {
+		t.Errorf("senders = %q, want each message's own kept while it was held", senders)
+	}
 
-	c.deliver([]byte("third"))
-	if len(got) != 3 || got[2] != "third" {
-		t.Errorf("messages = %v, want the third delivered straight through", got)
+	c.deliver([]byte("third"), "bob")
+	if len(got) != 3 || got[2] != "third" || senders[2] != "bob" {
+		t.Errorf("messages = %v from %q, want the third delivered straight through", got, senders)
 	}
 }
 

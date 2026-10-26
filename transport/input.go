@@ -98,8 +98,17 @@ func (bi *BaseInput) PushAudioFrame(ctx context.Context, f frames.InputAudioFram
 // traveling downstream. Only the copy going its way reaches it, so it handles
 // the message once.
 func (bi *BaseInput) PushTransportMessage(ctx context.Context, raw []byte) {
+	bi.PushParticipantMessage(ctx, raw, "")
+}
+
+// PushParticipantMessage is PushTransportMessage for a transport that knows who
+// sent the message. The frame carries participantID as its ParticipantID, so
+// whatever handles the message can tell whose it was.
+func (bi *BaseInput) PushParticipantMessage(ctx context.Context, raw []byte, participantID string) {
 	_ = bi.Broadcast(ctx, func() frames.Frame {
-		return frames.NewInputTransportMessageFrame(raw)
+		f := frames.NewInputTransportMessageFrame(raw)
+		f.ParticipantID = participantID
+		return f
 	})
 }
 

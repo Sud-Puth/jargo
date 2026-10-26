@@ -44,6 +44,7 @@ const (
 	TypeErrorResponse        = "error-response"
 	TypeError                = "error"
 	TypeUserTranscription    = "user-transcription"
+	TypeUserInput            = "user-input"
 	TypeBotOutput            = "bot-output"
 	TypeBotTranscription     = "bot-transcription"
 	TypeBotTTSText           = "bot-tts-text"
@@ -542,6 +543,44 @@ func UserTranscription(text, userID, timestamp string, final bool) Message {
 		Timestamp: timestamp,
 		Final:     final,
 	})
+}
+
+// UserInputType says what kind of input a user-input message reports.
+type UserInputType string
+
+// The kinds of user input.
+const (
+	// UserInputTranscription is speech transcribed by the STT.
+	UserInputTranscription UserInputType = "transcription"
+	// UserInputChat is text the client sent.
+	UserInputChat UserInputType = "chat"
+	// UserInputBackchannel is a short acknowledgment the user said while the bot
+	// talks, such as "mhm".
+	UserInputBackchannel UserInputType = "backchannel"
+)
+
+// UserInputData is the payload of a user-input message.
+type UserInputData struct {
+	// Text is what the user said or typed.
+	Text string `json:"text"`
+	// InputType is what kind of input it is.
+	InputType UserInputType `json:"input_type"`
+	// Timestamp is when the user said or sent it.
+	Timestamp string `json:"timestamp"`
+	// Final is whether the text is final. Only an interim transcription is not.
+	Final bool `json:"final"`
+	// UserID identifies who spoke or typed. For chat it is set only when the
+	// transport knows the sender, such as LiveKit.
+	UserID string `json:"user_id,omitempty"`
+	// MsgID is, for chat, the id of the client's send-text message.
+	MsgID string `json:"msg_id,omitempty"`
+}
+
+// UserInput builds a user-input message: what the user said or typed. It is the
+// user's counterpart of bot-output. A backchannel does not interrupt the bot or
+// reach the LLM.
+func UserInput(d UserInputData) Message {
+	return newMessage(TypeUserInput, "", d)
 }
 
 // MetricData is one timing or count entry in a metrics message (ttfb,

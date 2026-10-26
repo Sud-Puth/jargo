@@ -80,6 +80,35 @@ func (f *ClientMessageFrame) String() string {
 	return fmt.Sprintf("%s(id: %s, type: %s)", f.Name(), f.MsgID, f.Type)
 }
 
+// SendTextFrame carries the text the client sent in a send-text message. The
+// Processor pushes it downstream right after the frame that appends the text
+// to the LLM context, and the Observer acknowledges it to the client with a
+// user-input message.
+type SendTextFrame struct {
+	frames.BaseSystemFrame
+	// MsgID is the id the client gave its send-text message.
+	MsgID string
+	// Text is the text the client sent.
+	Text string
+	// UserID identifies who sent it, when the transport knows.
+	UserID string
+}
+
+// NewSendTextFrame builds a SendTextFrame.
+func NewSendTextFrame(msgID, text, userID string) *SendTextFrame {
+	return &SendTextFrame{
+		BaseSystemFrame: frames.NewBaseSystemFrame("RTVISendTextFrame"),
+		MsgID:           msgID,
+		Text:            text,
+		UserID:          userID,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *SendTextFrame) String() string {
+	return fmt.Sprintf("%s(msg_id: %s, text: [%s])", f.Name(), f.MsgID, f.Text)
+}
+
 // ServerMessageFrame carries an unprompted message to the client: whatever the
 // bot wants to tell it that the protocol has no message for. Push one from
 // anywhere in the pipeline and the Observer sends it.

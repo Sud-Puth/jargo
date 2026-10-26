@@ -56,8 +56,8 @@ type Connection struct {
 	closed    chan struct{}
 
 	msgMu      sync.Mutex
-	msgHandler func([]byte)
-	pendingIn  [][]byte
+	msgHandler func(data []byte, sender string)
+	pendingIn  []dataMessage
 
 	dtmfMu      sync.Mutex
 	dtmfHandler func(frames.KeypadEntry)
@@ -93,10 +93,11 @@ func Connect(cfg Config) (*Connection, error) {
 		default:
 		}
 	}
-	cb.OnDataPacket = func(data lksdk.DataPacket, _ lksdk.DataReceiveParams) {
+	cb.OnDataPacket = func(data lksdk.DataPacket, params lksdk.DataReceiveParams) {
 		switch p := data.(type) {
 		case *lksdk.UserDataPacket:
-			c.deliver(p.Payload)
+			// A packet sent by a server SDK comes with no sender identity.
+			c.deliver(p.Payload, params.SenderIdentity)
 		case *livekit.SipDTMF:
 			// A key pressed by a caller on a SIP leg of the room.
 			c.deliverDTMF(p.Digit)
@@ -157,29 +158,37 @@ func (c *Connection) WriteAudio(packet []byte, dur time.Duration) error {
 	return c.localTrack.WriteSample(media.Sample{Data: packet, Duration: dur}, nil)
 }
 
-// OnMessage registers the handler for data messages received in the room. Any
-// messages that arrived before a handler was set are delivered immediately.
-func (c *Connection) OnMessage(h func([]byte)) {
+// OnMessage registers the handler for data messages received in the room. It is
+// given each message with the identity of the participant who sent it, empty for
+// a message a server SDK sent. Any messages that arrived before a handler was
+// set are delivered immediately.
+func (c *Connection) OnMessage(h func(data []byte, sender string)) {
 	c.msgMu.Lock()
 	c.msgHandler = h
 	in := c.pendingIn
 	c.pendingIn = nil
 	c.msgMu.Unlock()
 	for _, m := range in {
-		h(m)
+		h(m.data, m.sender)
 	}
 }
 
-func (c *Connection) deliver(data []byte) {
+// dataMessage is a data message held until a handler is set, with its sender.
+type dataMessage struct {
+	data   []byte
+	sender string
+}
+
+func (c *Connection) deliver(data []byte, sender string) {
 	c.msgMu.Lock()
 	h := c.msgHandler
 	if h == nil {
-		c.pendingIn = append(c.pendingIn, data)
+		c.pendingIn = append(c.pendingIn, dataMessage{data: data, sender: sender})
 		c.msgMu.Unlock()
 		return
 	}
 	c.msgMu.Unlock()
-	h(data)
+	h(data, sender)
 }
 
 // OnDTMF registers the handler for the keys a SIP caller presses. Keys that

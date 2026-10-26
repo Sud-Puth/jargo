@@ -87,8 +87,12 @@ func TestProcessorHandshakeAndTranscript(t *testing.T) {
 		t.Fatalf("expected bot-ready id req-1, got %+v", got)
 	}
 
-	// TranscriptionFrame -> user-transcription
+	// TranscriptionFrame -> user-input, then user-transcription
 	task.QueueFrame(frames.NewTranscriptionFrame("bonjour", "user-1", "ts"))
+	got = waitMessage(t, out)
+	if got.Type != rtvi.TypeUserInput {
+		t.Fatalf("expected user-input, got %+v", got)
+	}
 	got = waitMessage(t, out)
 	if got.Type != rtvi.TypeUserTranscription {
 		t.Fatalf("expected user-transcription, got %+v", got)

@@ -48,9 +48,16 @@ type Processor struct {
 	// carries them out. Acting on one can mean waiting for the pipeline to
 	// settle, and the probe that reports settling has to travel through this
 	// processor, so the wait cannot happen on the frame path.
-	messages chan Incoming
+	messages chan queuedMessage
 	// messagesWG tracks that goroutine, so cleanup does not race it.
 	messagesWG sync.WaitGroup
+}
+
+// queuedMessage is a client message waiting for the message goroutine, with
+// who sent it when the transport knows.
+type queuedMessage struct {
+	in     Incoming
+	userID string
 }
 
 // messageBuffer is how many client messages may be queued for the handler
@@ -81,7 +88,7 @@ func (p *Processor) Setup(ctx context.Context, s processor.Setup) error {
 	if err := p.Base.Setup(ctx, s); err != nil {
 		return err
 	}
-	p.messages = make(chan Incoming, messageBuffer)
+	p.messages = make(chan queuedMessage, messageBuffer)
 	p.messagesWG.Add(1)
 	go p.messageLoop(ctx)
 	return nil
@@ -104,12 +111,12 @@ func (p *Processor) messageLoop(ctx context.Context) {
 	defer p.messagesWG.Done()
 	for {
 		select {
-		case in, ok := <-p.messages:
+		case m, ok := <-p.messages:
 			if !ok {
 				return
 			}
-			if err := p.handleMessage(ctx, in); err != nil {
-				slog.Warn("RTVI message failed", "type", in.Type, "err", err)
+			if err := p.handleMessage(ctx, m.in, m.userID); err != nil {
+				slog.Warn("RTVI message failed", "type", m.in.Type, "err", err)
 			}
 		case <-ctx.Done():
 			return
@@ -146,6 +153,9 @@ func (p *Processor) ProcessFrame(ctx context.Context, f frames.Frame, dir proces
 // A frame usually maps to one message, but a tool-call batch reports each call
 // in it separately, so the result is a list.
 func (o *Observer) messagesFor(f frames.Frame) []Message {
+	if msgs, ok := o.userInputMessages(f); ok {
+		return msgs
+	}
 	if msg, ok := o.userMessageFor(f); ok {
 		return []Message{msg}
 	}
@@ -267,16 +277,55 @@ func (o *Observer) callMessage(name string, build func(FunctionCallReportLevel) 
 	return []Message{build(level)}, true
 }
 
+// userInputMessages maps what the user said or typed: transcriptions, interim
+// ones included, backchannels, and the text the client sent. A transcription is
+// reported as user-input and, as before it, as user-transcription.
+func (o *Observer) userInputMessages(f frames.Frame) ([]Message, bool) {
+	var d UserInputData
+	switch fr := f.(type) {
+	case *frames.TranscriptionFrame:
+		return o.transcriptionMessages(fr.Text, fr.UserID, fr.Timestamp, true), true
+	case *frames.InterimTranscriptionFrame:
+		return o.transcriptionMessages(fr.Text, fr.UserID, fr.Timestamp, false), true
+	case *frames.UserBackchannelFrame:
+		d = UserInputData{
+			Text: fr.Text, InputType: UserInputBackchannel, Timestamp: fr.Timestamp, Final: true, UserID: fr.UserID,
+		}
+	case *SendTextFrame:
+		d = UserInputData{
+			Text: fr.Text, InputType: UserInputChat, Timestamp: frames.NowTimestamp(), Final: true,
+			UserID: fr.UserID, MsgID: fr.MsgID,
+		}
+	default:
+		return nil, false
+	}
+	if !o.enabled(userInputOf) {
+		return nil, true
+	}
+	return []Message{UserInput(d)}, true
+}
+
+// transcriptionMessages reports a transcription, final or interim, in each of
+// the messages enabled for it.
+func (o *Observer) transcriptionMessages(text, userID, timestamp string, final bool) []Message {
+	var msgs []Message
+	if o.enabled(userInputOf) {
+		msgs = append(msgs, UserInput(UserInputData{
+			Text: text, InputType: UserInputTranscription, Timestamp: timestamp, Final: final, UserID: userID,
+		}))
+	}
+	if o.enabled(transcriptionOf) {
+		msgs = append(msgs, UserTranscription(text, userID, timestamp, final))
+	}
+	return msgs
+}
+
 // userMessageFor maps user- and system-originated frames. The second result
 // reports whether the frame was one of them at all, so a category the observer
 // was told not to report stops the dispatch rather than falling through to
 // another mapping.
 func (o *Observer) userMessageFor(f frames.Frame) (Message, bool) {
 	switch fr := f.(type) {
-	case *frames.TranscriptionFrame:
-		return o.gated(UserTranscription(fr.Text, fr.UserID, fr.Timestamp, true), transcriptionOf)
-	case *frames.InterimTranscriptionFrame:
-		return o.gated(UserTranscription(fr.Text, fr.UserID, fr.Timestamp, false), transcriptionOf)
 	case *frames.UserStartedSpeakingFrame:
 		return o.gated(event(TypeUserStartedSpeaking), userSpeakingOf)
 	case *frames.UserStoppedSpeakingFrame:
@@ -308,6 +357,7 @@ func (o *Observer) userMessageFor(f frames.Frame) (Message, bool) {
 // The categories a message can belong to, named so a gate reads as the thing it
 // controls rather than as a field lookup.
 func transcriptionOf(p ObserverParams) *bool { return p.UserTranscriptionEnabled }
+func userInputOf(p ObserverParams) *bool     { return p.UserInputEnabled }
 func userSpeakingOf(p ObserverParams) *bool  { return p.UserSpeakingEnabled }
 func metricsOf(p ObserverParams) *bool       { return p.MetricsEnabled }
 func botSpeakingOf(p ObserverParams) *bool   { return p.BotSpeakingEnabled }
@@ -661,21 +711,23 @@ func (p *Processor) handleIncoming(ctx context.Context, f *frames.InputTransport
 		slog.Warn("invalid RTVI message", "err", err)
 		return p.send(ctx, Error("invalid RTVI transport message: "+err.Error(), false))
 	}
+	// A transport that knows who sent the message, such as LiveKit, says so on
+	// the frame.
 	select {
-	case p.messages <- in:
+	case p.messages <- queuedMessage{in: in, userID: f.ParticipantID}:
 	case <-ctx.Done():
 	}
 	return nil
 }
 
-// handleMessage carries out one client message. It runs on the message
-// goroutine, never the frame path.
-func (p *Processor) handleMessage(ctx context.Context, in Incoming) error {
+// handleMessage carries out one client message, sent by userID when the
+// transport knows. It runs on the message goroutine, never the frame path.
+func (p *Processor) handleMessage(ctx context.Context, in Incoming, userID string) error {
 	switch in.Type {
 	case TypeClientReady:
 		return p.handleClientReady(ctx, in)
 	case TypeSendText:
-		return p.handleSendText(ctx, in)
+		return p.handleSendText(ctx, in, userID)
 	case TypeDTMF:
 		return p.handleDTMF(ctx, in)
 	case TypeDisconnectBot:
@@ -874,12 +926,15 @@ func (p *Processor) ClientVersion() [3]int {
 // Running immediately also cuts the bot off mid-answer, which is what makes it a
 // barge-in the client typed rather than spoke.
 //
+// The append is followed by a SendTextFrame, sent by userID when the transport
+// knows, which the Observer acknowledges to the client as a user-input message.
+//
 // A turn the client asked not to be spoken is bracketed by the output
 // configuration it wants and the one that was in effect before it, so the
 // setting applies to this turn alone. The three travel one behind the other in
 // the same direction, which is what keeps the restore from overtaking the turn
 // it closes.
-func (p *Processor) handleSendText(ctx context.Context, in Incoming) error {
+func (p *Processor) handleSendText(ctx context.Context, in Incoming, userID string) error {
 	d, err := ParseSendTextData(in.Data)
 	if err != nil {
 		slog.Warn("invalid RTVI send-text", "err", err)
@@ -907,6 +962,9 @@ func (p *Processor) handleSendText(ctx context.Context, in Incoming) error {
 
 	appendMsg := frames.NewLLMMessagesAppendFrame([]frames.Message{{Role: frames.RoleUser, Text: d.Content}})
 	if err := p.PushFrame(ctx, appendMsg, processor.Downstream); err != nil {
+		return err
+	}
+	if err := p.PushFrame(ctx, NewSendTextFrame(in.ID, d.Content, userID), processor.Downstream); err != nil {
 		return err
 	}
 	if d.RunImmediately() {

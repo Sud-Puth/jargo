@@ -9,6 +9,9 @@ type InputTransportMessageFrame struct {
 	BaseSystemFrame
 	// Message is the raw message payload as received (typically JSON).
 	Message []byte
+	// ParticipantID identifies who sent the message. Only a transport that
+	// knows the sender, such as LiveKit, sets it.
+	ParticipantID string
 }
 
 // NewInputTransportMessageFrame builds an InputTransportMessageFrame.
