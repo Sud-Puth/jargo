@@ -96,6 +96,13 @@ func TestSendTextRunImmediatelyCommitsBeforeAppending(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the bot never started answering")
 	}
+	// The answer has been pushed, but the assistant aggregator may not have taken
+	// it in yet, and an interruption drops what a processor has still to handle.
+	// Letting the pipeline settle puts the bot mid-answer, holding text the
+	// interruption has to commit.
+	if err := task.Flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// The second turn arrives mid-answer, so it interrupts.
 	task.QueueFrame(sendTextFrame(t, "actually, never mind"))
