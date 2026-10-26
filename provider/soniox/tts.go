@@ -36,7 +36,7 @@ const (
 
 // TTSConfig configures the Soniox streaming TTS service.
 type TTSConfig struct {
-	// APIKey is the Soniox API key, sent in the stream configuration. Required.
+	// APIKey is the Soniox API key, sent on the WebSocket handshake. Required.
 	APIKey string `validate:"required"`
 	// URL overrides the synthesis WebSocket endpoint; empty uses the hosted
 	// endpoint.
@@ -137,11 +137,11 @@ func (s *ttsSynthesizer) spacelessLanguage() bool {
 	}
 }
 
-// config is the opening message. It carries the credentials, the voice
-// parameters, and the stream id every later message refers to.
+// config is the opening message. It carries the voice parameters and the
+// stream id every later message refers to; the credentials travel in the
+// handshake header.
 func (s *ttsSynthesizer) config(withTimestamps bool) map[string]any {
 	cfg := map[string]any{
-		"api_key":           s.cfg.APIKey,
 		keyStreamID:         ttsStreamID,
 		"model":             s.cfg.Model,
 		"voice":             s.cfg.Voice,
@@ -187,7 +187,7 @@ func (s *ttsSynthesizer) run(
 	emit func(pcm []byte) error,
 	word func(words []uctx.WordTiming, opts tts.WordTimingOptions) error,
 ) error {
-	conn, err := wsutil.Dial(ctx, s.cfg.URL, nil, readLimit)
+	conn, err := wsutil.Dial(ctx, s.cfg.URL, authHeader(s.cfg.APIKey), readLimit)
 	if err != nil {
 		return err
 	}

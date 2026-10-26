@@ -20,6 +20,8 @@ import (
 
 // sonioxSession is what the fake endpoint saw and what it will say.
 type sonioxSession struct {
+	// auth is the Authorization header the session was opened with.
+	auth      chan string
 	handshake chan string
 	audio     chan []byte
 	send      chan string
@@ -29,11 +31,16 @@ type sonioxSession struct {
 func sonioxServer(t *testing.T) (endpoint string, got *sonioxSession) {
 	t.Helper()
 	got = &sonioxSession{
+		auth:      make(chan string, 4),
 		handshake: make(chan string, 4),
 		audio:     make(chan []byte, 8),
 		send:      make(chan string, 8),
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got.auth <- r.Header.Get("Authorization"):
+		default:
+		}
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -90,8 +97,9 @@ func dialSoniox(t *testing.T, cfg Config) (stt.Stream, *sonioxSession) {
 }
 
 // TestConnectSendsTheHandshake checks the socket is configured before anything
-// else happens: the key travels in the handshake, not in a header, so a session
-// that skipped it would be dialed and then refused.
+// else happens, and that the key travels as a Bearer header on the WebSocket
+// handshake rather than in the configuration message, which Soniox stops
+// accepting it in on 2027-01-15.
 func TestConnectSendsTheHandshake(t *testing.T) {
 	_, got := dialSoniox(t, Config{Model: "stt-rt-v5"})
 
@@ -105,8 +113,11 @@ func TestConnectSendsTheHandshake(t *testing.T) {
 		t.Fatal("no handshake reached the server")
 	}
 
-	if cfg["api_key"] != "test-key" {
-		t.Errorf("handshake api_key = %v, want test-key", cfg["api_key"])
+	if auth := <-got.auth; auth != "Bearer test-key" {
+		t.Errorf("Authorization = %q, want the Bearer key", auth)
+	}
+	if _, ok := cfg["api_key"]; ok {
+		t.Errorf("handshake api_key = %v, want the key only in the header", cfg["api_key"])
 	}
 	if cfg["model"] != "stt-rt-v5" {
 		t.Errorf("handshake model = %v, want stt-rt-v5", cfg["model"])

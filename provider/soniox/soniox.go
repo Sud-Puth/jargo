@@ -12,6 +12,7 @@ package soniox
 
 import (
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/gojargo/jargo/internal/validate"
@@ -35,7 +36,7 @@ var errServer = errors.New("soniox: server error")
 
 // Config configures the Soniox STT service.
 type Config struct {
-	// APIKey is the Soniox API key, sent in the config handshake. Required.
+	// APIKey is the Soniox API key, sent on the WebSocket handshake. Required.
 	APIKey string `validate:"required"`
 	// URL overrides the real-time endpoint; empty uses the hosted endpoint.
 	URL string
@@ -84,3 +85,9 @@ type Config struct {
 
 // Validate reports whether the configuration is usable.
 func (c Config) Validate() error { return validate.Struct(c) }
+
+// authHeader is the WebSocket handshake header that authenticates a session.
+// Soniox stops accepting the key in the configuration message on 2027-01-15.
+func authHeader(apiKey string) http.Header {
+	return http.Header{"Authorization": []string{"Bearer " + apiKey}}
+}

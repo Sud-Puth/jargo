@@ -138,10 +138,10 @@ func (c *connector) ServiceLanguage(l language.Language) string {
 	return l.BaseCode()
 }
 
-// Connect dials the WebSocket and sends the config handshake (which carries the
-// API key).
+// Connect dials the WebSocket, authenticated by the API key in its handshake
+// header, and sends the config message.
 func (c *connector) Connect(ctx context.Context, sampleRate int) (stt.Stream, error) {
-	conn, err := wsutil.Dial(ctx, c.cfg.URL, nil, readLimit)
+	conn, err := wsutil.Dial(ctx, c.cfg.URL, authHeader(c.cfg.APIKey), readLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,6 @@ func (c *connector) Connect(ctx context.Context, sampleRate int) (stt.Stream, er
 
 func (c *connector) config(sampleRate int) []byte {
 	cfg := map[string]any{
-		"api_key":                   c.cfg.APIKey,
 		"model":                     c.live.Model.Or(c.cfg.Model),
 		"audio_format":              "s16le",
 		"sample_rate":               sampleRate,

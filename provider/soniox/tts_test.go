@@ -47,7 +47,6 @@ func TestTTSConfigMessage(t *testing.T) {
 		cfg := s.config(true)
 
 		want := map[string]any{
-			"api_key":           "k",
 			keyStreamID:         ttsStreamID,
 			"model":             defaultTTSModel,
 			"voice":             defaultVoice,
@@ -116,6 +115,10 @@ func TestSpacelessLanguage(t *testing.T) {
 
 // ttsServer starts a fake Soniox endpoint that records the client's messages
 // and replies with a scripted sequence.
+// authMessage keys the message the fake server reports the handshake's
+// Authorization header in.
+const authMessage = "authorization header"
+
 func ttsServer(t *testing.T, events []map[string]any) (endpoint string, sent <-chan map[string]any) {
 	t.Helper()
 	messages := make(chan map[string]any, 8)
@@ -127,6 +130,9 @@ func ttsServer(t *testing.T, events []map[string]any) (endpoint string, sent <-c
 		}
 		defer func() { _ = c.Close(websocket.StatusNormalClosure, "") }()
 		ctx := r.Context()
+		// The handshake's Authorization header is reported as a message of its
+		// own, ahead of what the client sends.
+		messages <- map[string]any{authMessage: r.Header.Get("Authorization")}
 
 		// The client sends the config, the text, and the end marker before any
 		// audio comes back.
@@ -195,9 +201,12 @@ func TestTTSSynthesize(t *testing.T) {
 		t.Errorf("emitted %q, want the concatenated PCM chunks", got)
 	}
 
+	if auth := <-sent; auth[authMessage] != "Bearer test-key" {
+		t.Errorf("Authorization = %v, want the Bearer key", auth[authMessage])
+	}
 	cfg := <-sent
-	if cfg["api_key"] != "test-key" {
-		t.Errorf("config api_key = %v, want the key", cfg["api_key"])
+	if _, ok := cfg["api_key"]; ok {
+		t.Errorf("config api_key = %v, want the key only in the header", cfg["api_key"])
 	}
 	if cfg["stream_id"] != ttsStreamID {
 		t.Errorf("config stream_id = %v, want %q", cfg["stream_id"], ttsStreamID)
