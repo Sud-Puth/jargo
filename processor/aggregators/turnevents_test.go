@@ -462,3 +462,88 @@ func TestAThoughtIsNotSpoken(t *testing.T) {
 		t.Fatalf("assistant turns = %+v, want one saying only the reply", got)
 	}
 }
+
+// TestUserAnnouncesTheTurnToThePipeline checks that a user turn written to the
+// conversation is announced as a frame, both ways, the user's side of the
+// assistant turn frame, and ahead of the conversation it was written to.
+func TestUserAnnouncesTheTurnToThePipeline(t *testing.T) {
+	convo := frames.NewLLMContext("system")
+	pair := aggregators.New(convo, aggregators.WithTurns(turns.Config{
+		Strategies: turns.UserTurnStrategies{
+			Stop: []turns.StopStrategy{turns.NewSpeechTimeoutStop(turns.SpeechTimeoutConfig{})},
+		},
+	}))
+
+	var mu sync.Mutex
+	var down, up []frames.Frame
+	task := pipeline.NewWorker(pipeline.New(pair.User()), pipeline.WorkerConfig{
+		ReachedDownstreamFilter: pipeline.AnyFrame,
+		ReachedUpstreamFilter:   pipeline.AnyFrame,
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
+		mu.Lock()
+		down = append(down, f)
+		mu.Unlock()
+	})
+	events.On(&task.Registry, pipeline.EventFrameReachedUpstream, func(_ context.Context, f frames.Frame) {
+		mu.Lock()
+		up = append(up, f)
+		mu.Unlock()
+	})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+
+	task.QueueFrame(frames.NewVADUserStartedSpeakingFrame(0.2, time.Now()))
+	tf := frames.NewTranscriptionFrame("hello there", "u", "ts")
+	tf.Finalized = true
+	task.QueueFrame(tf)
+	task.QueueFrame(frames.NewVADUserStoppedSpeakingFrame(0.2, time.Now()))
+	// The speech timeout closes the turn, writing it, before the session ends.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(up)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	task.StopWhenDone()
+	<-runDone
+	settle()
+
+	mu.Lock()
+	defer mu.Unlock()
+	turnAt, contextAt := -1, -1
+	for i, f := range down {
+		switch fr := f.(type) {
+		case *frames.LLMContextUserTurnFrame:
+			if turnAt < 0 {
+				turnAt = i
+			}
+			if fr.Text != "hello there" || fr.Timestamp == "" {
+				t.Errorf("turn frame = %v, want the turn's text and when it began", fr)
+			}
+		case *frames.LLMContextFrame:
+			if contextAt < 0 {
+				contextAt = i
+			}
+		}
+	}
+	if turnAt < 0 {
+		t.Fatal("no user turn frame went downstream")
+	}
+	if contextAt >= 0 && contextAt < turnAt {
+		t.Error("the conversation went out ahead of the turn frame announcing what was written to it")
+	}
+	found := false
+	for _, f := range up {
+		if _, ok := f.(*frames.LLMContextUserTurnFrame); ok {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no user turn frame went upstream")
+	}
+}

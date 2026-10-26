@@ -87,6 +87,7 @@ func init() {
 	Types.Register("LLMConfigureOutputFrame", &frames.LLMConfigureOutputFrame{})
 	Types.Register("LLMContextAssistantTimestampFrame", &frames.LLMContextAssistantTimestampFrame{})
 	Types.Register("LLMContextAssistantTurnFrame", &frames.LLMContextAssistantTurnFrame{})
+	Types.Register("LLMContextUserTurnFrame", &frames.LLMContextUserTurnFrame{})
 	Types.Register("LLMContextFrame", &frames.LLMContextFrame{})
 	Types.Register("LLMContextSummaryRequestFrame", &frames.LLMContextSummaryRequestFrame{})
 	Types.Register("LLMContextSummaryResultFrame", &frames.LLMContextSummaryResultFrame{})

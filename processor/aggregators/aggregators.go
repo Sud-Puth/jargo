@@ -1031,6 +1031,11 @@ func (u *UserAggregator) commitTurn(ctx context.Context, runLLM bool) (string, e
 		return "", nil
 	}
 	u.context.AddUserMessage(said)
+	if err := u.Broadcast(ctx, func() frames.Frame {
+		return frames.NewLLMContextUserTurnFrame(said, startedAt)
+	}); err != nil {
+		return said, err
+	}
 	var err error
 	if runLLM {
 		err = u.PushFrame(ctx, frames.NewLLMContextFrame(u.context), processor.Downstream)

@@ -315,6 +315,10 @@ func catalog() []catalogEntry {
 			build: func() frames.Frame { return frames.NewLLMContextAssistantTurnFrame("said it", "ts") },
 		},
 		{
+			label: "LLMContextUserTurnFrame", cat: data, wantString: "heard it",
+			build: func() frames.Frame { return frames.NewLLMContextUserTurnFrame("heard it", "ts") },
+		},
+		{
 			label: "LLMContextAssistantTimestampFrame", cat: data, wantString: "timestamp: ts",
 			build: func() frames.Frame { return frames.NewLLMContextAssistantTimestampFrame("ts") },
 		},

@@ -713,6 +713,35 @@ func (f *LLMContextAssistantTurnFrame) String() string {
 	return fmt.Sprintf("%s(text: [%s], timestamp: %s)", f.Name(), f.Text, f.Timestamp)
 }
 
+// LLMContextUserTurnFrame carries the aggregated text of a user turn, as written
+// to the LLM context.
+//
+// The user aggregator broadcasts it each time it writes what the user said to
+// the conversation, so it holds what the bot heard: a transcription the
+// aggregator leaves out, such as one while the user is muted, is not in it. It
+// is the user's side of LLMContextAssistantTurnFrame. It is a data frame.
+type LLMContextUserTurnFrame struct {
+	BaseDataFrame
+	// Text is the user's aggregated transcript for this turn.
+	Text string
+	// Timestamp is when the user's turn began, in ISO 8601.
+	Timestamp string
+}
+
+// NewLLMContextUserTurnFrame builds an LLMContextUserTurnFrame.
+func NewLLMContextUserTurnFrame(text, timestamp string) *LLMContextUserTurnFrame {
+	return &LLMContextUserTurnFrame{
+		BaseDataFrame: NewBaseDataFrame("LLMContextUserTurnFrame"),
+		Text:          text,
+		Timestamp:     timestamp,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *LLMContextUserTurnFrame) String() string {
+	return fmt.Sprintf("%s(text: [%s], timestamp: %s)", f.Name(), f.Text, f.Timestamp)
+}
+
 // LLMContextAssistantTimestampFrame carries when an assistant message was
 // written, for a consumer keeping its own record of the conversation alongside
 // the context. It is a data frame.
