@@ -597,11 +597,17 @@ func (o *Observer) skippedSegmentSpoken(segmentID uint64) {
 }
 
 // interrupted records that an interruption cut off the bot's output, and with
-// it the skipped segments still remembered.
+// it the skipped segments still remembered. The segments queued for speech the
+// interruption cut off are dropped: they would otherwise go out with the bot's
+// next speech, and hold back text that is not spoken. Uninterruptible speech
+// still plays, so its segments are kept.
 func (o *Observer) interrupted() {
 	o.outputMu.Lock()
 	defer o.outputMu.Unlock()
 	o.skippedSegmentsInterrupted = true
+	o.queuedSegments = slices.DeleteFunc(o.queuedSegments, func(seg segment) bool {
+		return frames.Interruptible(seg.frame)
+	})
 }
 
 // forgetInterruptedSegmentsLocked forgets the skipped segments an interruption
@@ -636,11 +642,15 @@ func (o *Observer) stoppedSpeaking() {
 
 // holdUnlessSpeaking holds a segment back when the bot is not yet audible,
 // reporting whether it was held. A client told about text before the audio
-// carrying it would run ahead of what the caller hears.
+// carrying it would run ahead of what the caller hears. Text waits for the bot
+// to start speaking, including text spoken without a TTS service (a
+// speech-to-speech service's transcript); text the TTS service left out has
+// nothing to wait for, except text queued before it.
 func (o *Observer) holdUnlessSpeaking(seg segment) bool {
 	o.outputMu.Lock()
 	defer o.outputMu.Unlock()
-	if o.botSpeaking {
+	skipped := seg.frame.SkipTTS != nil && *seg.frame.SkipTTS
+	if o.botSpeaking || (skipped && len(o.queuedSegments) == 0) {
 		return false
 	}
 	o.queuedSegments = append(o.queuedSegments, seg)

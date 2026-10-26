@@ -227,6 +227,12 @@ type Base struct {
 
 	// aggregator groups streamed text into the units the provider is given.
 	aggregator ttstext.Aggregator
+	// skippedAggregator cuts model text marked to skip synthesis into
+	// sentences, so a reply that is not spoken still reaches a client as the
+	// bot's output. It is separate from aggregator because that one yields
+	// single tokens when streaming them, and only spoken tokens are regrouped
+	// into sentences afterwards, by the sequencer.
+	skippedAggregator ttstext.Aggregator
 	// sequencer keeps the frames of a synthesis in the order the text was
 	// spoken, so the conversation records it that way.
 	sequencer *uctx.AggregatedFrameSequencer
@@ -330,6 +336,7 @@ func New(name string, syn Synthesizer) *Base {
 	// Sentences are found in the language the service speaks, English when its
 	// settings name none.
 	b.aggregator = ttstext.NewSimpleAggregator(frames.TextTypeSentence, settingsLanguage(syn))
+	b.skippedAggregator = ttstext.NewSimpleAggregator(frames.TextTypeSentence, settingsLanguage(syn))
 	b.sequencer = uctx.NewAggregatedFrameSequencer(name, false)
 	if d, ok := syn.(Describer); ok {
 		b.meta = d.Metadata()
@@ -617,12 +624,14 @@ func (b *Base) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.D
 	if err := b.Base.ProcessFrame(ctx, f, dir); err != nil {
 		return err
 	}
-	// Text the LLM service stamped to skip synthesis passes straight through: it
-	// belongs in the conversation, but it is not to be spoken. The response
+	// Text the LLM service stamped to skip synthesis is not spoken, but it still
+	// belongs in the conversation, and a client still shows it. The response
 	// brackets are stamped with it too, so the turn they describe is not opened
-	// and closed here for speech that never happens.
+	// and closed here for speech that never happens. A reply that is not spoken
+	// is queued behind the audio still playing, so it comes out after that
+	// audio, its start, sentences and end in order.
 	if skipsTTS(f) {
-		return b.PushFrame(ctx, f, dir)
+		return b.handleSkipped(ctx, f, dir)
 	}
 	switch fr := f.(type) {
 	case *frames.LLMTextFrame:
@@ -672,6 +681,58 @@ func (b *Base) handleSettingsUpdate(
 	}
 	b.updateSettings(ctx, f)
 	return nil
+}
+
+// handleSkipped handles a frame stamped to skip synthesis: the brackets and
+// sentences of a reply that is not spoken are queued behind the audio, and any
+// other text, such as an IVR tag, is pushed on as it is.
+func (b *Base) handleSkipped(ctx context.Context, f frames.Frame, dir processor.Direction) error {
+	switch fr := f.(type) {
+	case *frames.LLMFullResponseStartFrame:
+		return b.queueSerial(ctx, f, dir)
+	case *frames.LLMTextFrame:
+		return b.handleSkippedLLMText(ctx, fr, dir)
+	case *frames.LLMFullResponseEndFrame:
+		return b.handleSkippedResponseEnd(ctx, f, dir)
+	default:
+		return b.PushFrame(ctx, f, dir)
+	}
+}
+
+// handleSkippedLLMText queues each sentence of model text that is not spoken.
+func (b *Base) handleSkippedLLMText(ctx context.Context, f *frames.LLMTextFrame, dir processor.Direction) error {
+	for _, agg := range b.skippedAggregator.Aggregate(f.Text) {
+		if err := b.queueSkippedLLMText(ctx, agg, dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleSkippedResponseEnd queues the rest of a reply that is not spoken, then
+// the end of the reply.
+func (b *Base) handleSkippedResponseEnd(ctx context.Context, f frames.Frame, dir processor.Direction) error {
+	if rest, ok := b.skippedAggregator.Flush(); ok {
+		if err := b.queueSkippedLLMText(ctx, rest, dir); err != nil {
+			return err
+		}
+	}
+	return b.queueSerial(ctx, f, dir)
+}
+
+// queueSkippedLLMText queues a sentence of model text that is not spoken, as
+// the bot's output: an AggregatedTextFrame marked as skipping synthesis, which
+// RTVI sends as bot-output and the assistant aggregator writes to the
+// conversation.
+func (b *Base) queueSkippedLLMText(ctx context.Context, agg ttstext.Aggregation, dir processor.Direction) error {
+	if strings.TrimSpace(agg.Text) == "" {
+		return nil
+	}
+	f := b.aggregatedFrame(agg, "")
+	skip := true
+	f.SkipTTS = &skip
+	f.SetTransportDestination(b.destinationName())
+	return b.queueSerial(ctx, f, dir)
 }
 
 // skipsTTS reports whether the frame was stamped to bypass synthesis. Only the
@@ -745,6 +806,7 @@ func (b *Base) updateSettings(ctx context.Context, f *frames.TTSUpdateSettingsFr
 		// Applied with the settings, whether or not the stored value changed,
 		// and without clearing what the aggregator has buffered.
 		b.aggregator.SetLanguage(lang)
+		b.skippedAggregator.SetLanguage(lang)
 	}
 	if len(changed) == 0 {
 		return
@@ -927,6 +989,7 @@ func (b *Base) handleInterruption(ctx context.Context) {
 	if b.aggregator != nil {
 		b.aggregator.HandleInterruption()
 	}
+	b.skippedAggregator.HandleInterruption()
 	for _, f := range b.filters {
 		if i, ok := f.(ttstext.InterruptibleFilter); ok {
 			i.HandleInterruption()
@@ -1239,8 +1302,11 @@ func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, inter
 	// lands in the order it was written rather than ahead of the audio it
 	// follows.
 	if b.skipsSynthesis(agg.Type) {
-		b.pushSequencerFrames(ctx, b.sequencer.RegisterSkipped(
-			b.aggregatedFrame(agg, contextID), contextID, b.destinationName()), contextID)
+		skipped := b.aggregatedFrame(agg, contextID)
+		// Marked so whatever is downstream knows the service left it out.
+		skip := true
+		skipped.SkipTTS = &skip
+		b.pushSequencerFrames(ctx, b.sequencer.RegisterSkipped(skipped, contextID, b.destinationName()), contextID)
 		return nil
 	}
 

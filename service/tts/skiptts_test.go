@@ -80,10 +80,13 @@ func runResponse(t *testing.T, skipStamp *bool) (spoken []string, reached []fram
 }
 
 // hasText reports whether the response's text reached the end of the pipeline,
-// so the conversation is built from it whether or not it was spoken.
+// so the conversation is built from it whether or not it was spoken. A reply
+// that is not spoken arrives cut into sentences, each an AggregatedTextFrame
+// marked as skipping synthesis, which a client shows as the bot's output.
 func hasText(got []frames.Frame, want string) bool {
 	for _, f := range got {
-		if tf, ok := f.(*frames.LLMTextFrame); ok && tf.Text == want {
+		if af, ok := f.(*frames.AggregatedTextFrame); ok && af.Text == want &&
+			af.SkipTTS != nil && *af.SkipTTS && af.AppendToContext {
 			return true
 		}
 	}
@@ -100,9 +103,9 @@ func TestUnstampedResponseIsSpoken(t *testing.T) {
 }
 
 // TestStampedResponseSkipsSynthesis checks a response stamped to skip TTS is
-// passed through instead of spoken. The text itself still travels on, which is
-// what puts the reply in the conversation: on the spoken path the service
-// replaces it with the words it actually said, and there are none here.
+// not spoken. Its text still travels on, cut into sentences, which is what puts
+// the reply in the conversation and before a client: on the spoken path the
+// service replaces it with the words it actually said, and there are none here.
 func TestStampedResponseSkipsSynthesis(t *testing.T) {
 	skip := true
 	spoken, got := runResponse(t, &skip)

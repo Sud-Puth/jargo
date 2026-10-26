@@ -224,9 +224,10 @@ func TestBotOutputCompletesASegmentSpokenInOnePieceAsThatSegment(t *testing.T) {
 	}
 }
 
-// A unit nothing is going to speak has no playback to be anywhere in, so it
-// carries no status and no progress.
-func TestBotOutputSaysNothingAboutPlaybackForUnspokenText(t *testing.T) {
+// A unit nothing is going to speak gets one message, which starts its segment
+// as spoken text's first message does, so it says "new"; it has no playback to
+// make progress through.
+func TestBotOutputStartsUnspokenTextAsNew(t *testing.T) {
 	unspoken := frames.NewAggregatedTextFrame("print('hi')", "code")
 	msgs := outputHarness(t, rtvi.DefaultObserverParams(), "", speaking(), unspoken)
 
@@ -235,8 +236,8 @@ func TestBotOutputSaysNothingAboutPlaybackForUnspokenText(t *testing.T) {
 		t.Fatalf("got %d bot-output messages, want one: %v", len(got), types(msgs))
 	}
 	d := got[0]
-	if d.SpokenStatus != "" {
-		t.Errorf("status = %q, want none for text nothing will speak", d.SpokenStatus)
+	if d.SpokenStatus != rtvi.SpokenNew {
+		t.Errorf("status = %q, want new for text nothing will speak", d.SpokenStatus)
 	}
 	if d.SpokenProgress != nil {
 		t.Errorf("progress = %+v, want none", d.SpokenProgress)

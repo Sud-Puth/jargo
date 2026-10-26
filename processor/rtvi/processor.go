@@ -528,8 +528,9 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 		}
 		switch {
 		case !willBeSpoken:
-			// Nothing is going to speak it, so it has no playback to be
-			// anywhere in.
+			// Text that is not spoken gets this one message, which starts its
+			// segment as spoken text's first message does.
+			d.SpokenStatus = SpokenNew
 		case seg.spoken:
 			// Spoken text arrives once synthesis is done, so the segment is
 			// finished by the time the client hears about it.
