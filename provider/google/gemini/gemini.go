@@ -5,6 +5,8 @@ package gemini
 
 import (
 	"errors"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gojargo/jargo/internal/validate"
@@ -42,13 +44,83 @@ const (
 	keyThinkingConfig = "thinkingConfig"
 )
 
-// lowestThinkingLevels is the least each model will think, keyed by model
-// prefix. A model that is not listed accepts "minimal", the fastest setting.
+// The thinkingConfig keys and the levels the thinking defaults are made of.
+const (
+	keyThinkingBudget = "thinkingBudget"
+	keyThinkingLevel  = "thinkingLevel"
+	levelMinimal      = "minimal"
+	levelLow          = "low"
+)
+
+// thinkingDefaults is the lowest thinking setting Google documents for each
+// model, sent when the caller does not configure Thinking, keyed by model name.
+// The 2.5 models take a budget, where 0 turns thinking off and 2.5 Pro's minimum
+// is 128; later models take a level. 3.7 Flash, 3.8 Flash, 3.1 Pro and 4 Argon
+// reject "minimal", and the Flash-Lite models already default to it. Aliases
+// such as "gemini-flash-latest" are left out, since the model they name changes.
 //
 //nolint:gochecknoglobals // a lookup table
-var lowestThinkingLevels = map[string]string{
-	"gemini-3.7-flash": "low",
-	"gemini-3.8-flash": "low",
+var thinkingDefaults = map[string]map[string]any{
+	"gemini-2.5-flash":                   {keyThinkingBudget: 0},
+	"gemini-2.5-flash-lite":              {keyThinkingBudget: 0},
+	"gemini-2.5-pro":                     {keyThinkingBudget: 128},
+	"gemini-3-flash-preview":             {keyThinkingLevel: levelMinimal},
+	"gemini-3.1-flash-lite":              {keyThinkingLevel: levelMinimal},
+	"gemini-3.1-pro-preview":             {keyThinkingLevel: levelLow},
+	"gemini-3.1-pro-preview-customtools": {keyThinkingLevel: levelLow},
+	"gemini-3.5-flash":                   {keyThinkingLevel: levelMinimal},
+	"gemini-3.5-flash-lite":              {keyThinkingLevel: levelMinimal},
+	"gemini-3.6-flash":                   {keyThinkingLevel: levelMinimal},
+	"gemini-3.7-flash":                   {keyThinkingLevel: levelLow},
+	"gemini-3.8-flash":                   {keyThinkingLevel: levelLow},
+	"gemini-4-argon":                     {keyThinkingLevel: levelLow},
+	"gemma-4-26b-a4b-it":                 {keyThinkingLevel: levelMinimal},
+	"gemma-4-31b-it":                     {keyThinkingLevel: levelMinimal},
+}
+
+// modelsSupportingThinkingLevel are the models that take their thinking
+// configuration from a level, keyed by model name prefix. Whether one of these
+// honors a budget set alongside it varies by model and by backend, so such a
+// budget cannot be relied on.
+//
+//nolint:gochecknoglobals // a lookup table
+var modelsSupportingThinkingLevel = []string{"gemini-3", "gemini-4", "gemma-4"}
+
+// versionSuffix matches the version a model id can carry, as in
+// "gemini-2.5-flash-001".
+//
+//nolint:gochecknoglobals // compiled once, read-only
+var versionSuffix = regexp.MustCompile(`-\d{3}$`)
+
+// modelName is the name a model id refers to, for looking the model up in
+// thinkingDefaults and modelsSupportingThinkingLevel. Ids can name a model by
+// resource path ("models/gemini-3.6-flash",
+// "publishers/google/models/gemini-3.6-flash") or by version
+// ("gemini-2.5-flash-001").
+func modelName(model string) string {
+	name := strings.ToLower(model)
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return versionSuffix.ReplaceAllString(name, "")
+}
+
+// thinkingModel matches the names of the Gemini and Gemma text models that can
+// think: Gemini 2.5 and later, Gemma 4, and aliases such as
+// "gemini-flash-latest".
+//
+//nolint:gochecknoglobals // compiled once, read-only
+var thinkingModel = regexp.MustCompile(`^(?:gemini-(?:2\.5|[3-9])|gemma-4|gemini-[a-z-]+-latest$)`)
+
+// canThink reports whether a model name belongs to a Gemini or Gemma text model
+// that can think. Image, speech and embedding models are excluded.
+func canThink(name string) bool {
+	for _, kind := range []string{"image", "tts", "audio", "live", "embedding"} {
+		if strings.Contains(name, kind) {
+			return false
+		}
+	}
+	return thinkingModel.MatchString(name)
 }
 
 // SafetySetting is one content-safety filter: a category of harm and the
@@ -102,10 +174,10 @@ type Config struct {
 	// SafetySettings are the content-safety filters, one per harm category.
 	// Empty sends none, leaving every category at the API's default.
 	SafetySettings []SafetySetting `validate:"omitempty,dive"`
-	// Thinking controls the model's internal reasoning; nil applies the
-	// low-latency default for the model, which turns thinking off on the flash
-	// models. A voice pipeline wants an answer sooner rather than a considered
-	// one, and a model that thinks emits nothing while it does.
+	// Thinking controls the model's internal reasoning. If it is nil, the
+	// service sends the lowest thinking setting Google documents for the model,
+	// for the fastest responses, and logs what it sent. Models it does not list
+	// run at Google's default.
 	Thinking *ThinkingConfig `validate:"omitempty"`
 	// Seed makes sampling repeatable: the same seed and the same request usually
 	// produce the same answer, though Gemini treats it as best effort. Nil omits

@@ -40,6 +40,11 @@ type Service struct {
 	// reports whether it was configured (an unset union means "omit").
 	thinking    sdk.ThinkingConfigParamUnion
 	thinkingSet bool
+	// effort is the output_config.effort sent on each request; empty omits it.
+	effort string
+	// extraConfiguresThinking reports whether Extra sets thinking or an effort,
+	// which, like the configured ones, wins over the thinking default.
+	extraConfiguresThinking bool
 	// omitInterleavedThinking leaves the interleaved-thinking beta off every
 	// request, for a backend that does not take it.
 	omitInterleavedThinking bool
@@ -106,8 +111,11 @@ func NewLLMWithOptions(name string, cfg Config, extra ...option.RequestOption) *
 	if cfg.Thinking != nil {
 		display := sdk.ThinkingConfigAdaptiveDisplay(cfg.Thinking.Display)
 		switch cfg.Thinking.Type {
-		case "disabled":
+		case thinkingDisabled:
 			s.thinking = sdk.ThinkingConfigParamUnion{OfDisabled: &sdk.ThinkingConfigDisabledParam{}}
+			s.thinkingSet = true
+		case thinkingBetweenTools:
+			s.thinking = sdk.ThinkingConfigParamUnion{OfBetweenTools: &sdk.ThinkingConfigBetweenToolsParam{}}
 			s.thinkingSet = true
 		case "adaptive":
 			s.thinking = sdk.ThinkingConfigParamUnion{
@@ -120,15 +128,9 @@ func NewLLMWithOptions(name string, cfg Config, extra ...option.RequestOption) *
 			s.thinking = enabled
 			s.thinkingSet = true
 		}
-	} else if sonnetThinksByDefault(s.model) {
-		// Sonnet 5 and later think adaptively whenever a request omits the
-		// parameter, which for real-time voice can add seconds before the first
-		// answer token. Only the Sonnet line, Anthropic's speed tier: Opus and
-		// Fable are left at the provider default, since choosing one of those is
-		// a decision to reason.
-		s.thinking = sdk.ThinkingConfigParamUnion{OfDisabled: &sdk.ThinkingConfigDisabledParam{}}
-		s.thinkingSet = true
 	}
+	s.effort = cfg.Effort
+	s.extraConfiguresThinking = extraConfiguresThinking(cfg.Extra)
 	s.Base = llm.New(name, s)
 	s.Base.SetModel(s.model)
 	return s
@@ -162,7 +164,61 @@ func (s *Service) newParams(
 	if s.thinkingSet {
 		params.Thinking = s.thinking
 	}
+	if s.effort != "" {
+		params.OutputConfig.Effort = sdk.OutputConfigEffort(s.effort)
+	}
+	// Applied last, so an explicit thinking or effort setting, from the config
+	// or from Extra, wins over the low-latency default.
+	s.applyThinkingDefault(&params)
 	return params, nil
+}
+
+// extraConfiguresThinking reports whether the extra request fields set thinking
+// or an effort, either of which decides how much the model thinks.
+func extraConfiguresThinking(extra map[string]any) bool {
+	if _, ok := extra["thinking"]; ok {
+		return true
+	}
+	if _, ok := extra["output_config.effort"]; ok {
+		return true
+	}
+	outputConfig, ok := extra["output_config"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = outputConfig["effort"]
+	return ok
+}
+
+// applyThinkingDefault sends the model its lowest thinking setting when no
+// reasoning is configured.
+//
+// It applies the model's entry in thinkingDefaults, if it has one. A request
+// that already sets thinking or an effort, from the config or from Extra, is
+// left as it is, since the two together decide how much the model thinks. The
+// first request for each model logs the setting sent or, for a Claude model
+// that is not listed, warns that it runs at Anthropic's default.
+func (s *Service) applyThinkingDefault(params *sdk.MessageNewParams) {
+	if s.thinkingSet || s.effort != "" || s.extraConfiguresThinking {
+		return
+	}
+	name := modelName(s.model)
+	var setting string
+	if d, ok := thinkingDefaults[name]; ok {
+		switch {
+		case d.effort != "":
+			params.OutputConfig.Effort = sdk.OutputConfigEffort(d.effort)
+			setting = fmt.Sprintf(`output_config={"effort":%q}`, d.effort)
+		case d.thinking == thinkingBetweenTools:
+			params.Thinking = sdk.ThinkingConfigParamUnion{OfBetweenTools: &sdk.ThinkingConfigBetweenToolsParam{}}
+			setting = fmt.Sprintf(`thinking={"type":%q}`, d.thinking)
+		default:
+			params.Thinking = sdk.ThinkingConfigParamUnion{OfDisabled: &sdk.ThinkingConfigDisabledParam{}}
+			setting = fmt.Sprintf(`thinking={"type":%q}`, d.thinking)
+		}
+	}
+	s.ReportThinkingDefault(s.model, setting, strings.HasPrefix(name, "claude-"),
+		"Anthropic", "Thinking or Effort in anthropic.Config")
 }
 
 // toUsage converts the SDK's per-request usage into the pipeline's token usage.

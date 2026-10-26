@@ -98,10 +98,10 @@ type Config struct {
 	// answers. Only the gpt-5 series onward and the o-series reason; the default
 	// model does not, and the field has no effect there.
 	//
-	// Nil is not "the model's default": left unset, the service asks for
-	// effort "none" on every model that reasons and accepts it, and "minimal"
-	// on the original gpt-5 models, which reject "none", because a spoken turn
-	// cannot afford the thinking time. Set it to ask for more.
+	// Nil is not "the model's default": left unset, the service sends the
+	// lowest effort OpenAI documents for the model, for the fastest responses,
+	// and logs what it sent. Models it does not list run at OpenAI's default.
+	// Set it to ask for more.
 	//
 	// The encrypted reasoning is not carried from one turn to the next, so a
 	// model configured to reason starts each turn from the conversation alone.
@@ -160,33 +160,55 @@ func isOSeries(model string) bool { return oSeries.MatchString(strings.ToLower(m
 //nolint:gochecknoglobals // compiled once, read-only
 var snapshotDate = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}$`)
 
-// defaultReasoningEffort is the effort to request for a model when no reasoning
-// is configured, or "" to leave the provider's own default.
+// The reasoning efforts the thinking defaults are made of.
+const (
+	effortNone    = "none"
+	effortMinimal = "minimal"
+	effortLow     = "low"
+	effortMedium  = "medium"
+	effortHigh    = "high"
+)
+
+// thinkingDefaults is the lowest reasoning effort OpenAI documents for each
+// model, sent when the caller does not configure Reasoning, keyed by model
+// name. The pro models accept nothing below "medium", and gpt-5-pro only
+// "high".
 //
-// "none" switches reasoning off on the mainline gpt series from gpt-5.1 onward.
-// The original gpt-5, gpt-5-mini and gpt-5-nano reject "none", so they get their
-// lowest effort, "minimal". The models that accept neither are left at the
-// provider's default: the o-series, the -pro models, gpt-6-astra and
-// gpt-6.1-sol. So is a model that does not reason or is not recognized (see
-// modelSupportsReasoning). The API answers a value a model rejects with an
-// error rather than ignoring it, so every request would fail.
-func defaultReasoningEffort(model string) string {
-	if reasons, _ := modelSupportsReasoning(model); !reasons {
-		return ""
-	}
-	model = strings.ToLower(model)
-	if isOSeries(model) || strings.HasPrefix(model, "gpt-6-astra") || strings.HasPrefix(model, "gpt-6.1-sol") {
-		return ""
-	}
-	name := snapshotDate.ReplaceAllString(model, "")
-	if strings.HasSuffix(name, "-pro") {
-		return ""
-	}
-	switch name {
-	case "gpt-5", "gpt-5-mini", "gpt-5-nano":
-		return "minimal"
-	}
-	return "none"
+//nolint:gochecknoglobals // a lookup table
+var thinkingDefaults = map[string]string{
+	"gpt-5":         effortMinimal,
+	"gpt-5-mini":    effortMinimal,
+	"gpt-5-nano":    effortMinimal,
+	"gpt-5-pro":     effortHigh,
+	"gpt-5.1":       effortNone,
+	"gpt-5.2":       effortNone,
+	"gpt-5.2-pro":   effortMedium,
+	"gpt-5.4":       effortNone,
+	"gpt-5.4-mini":  effortNone,
+	"gpt-5.4-nano":  effortNone,
+	"gpt-5.4-pro":   effortMedium,
+	"gpt-5.5":       effortNone,
+	"gpt-5.5-pro":   effortMedium,
+	"gpt-5.6-luna":  effortNone,
+	"gpt-5.6-sol":   effortNone,
+	"gpt-5.6-terra": effortNone,
+	"gpt-6-astra":   effortLow,
+	"gpt-6-luna":    effortNone,
+	"gpt-6-sol":     effortNone,
+	"gpt-6.1-sol":   effortLow,
+	"o1":            effortLow,
+	"o1-pro":        effortLow,
+	"o3":            effortLow,
+	"o3-mini":       effortLow,
+	"o3-pro":        effortLow,
+	"o4-mini":       effortLow,
+}
+
+// modelName is the name a model id refers to, the key it is looked up by in
+// thinkingDefaults. A dated snapshot ("gpt-5-2025-08-07") gets its model's
+// entry.
+func modelName(model string) string {
+	return snapshotDate.ReplaceAllString(strings.ToLower(model), "")
 }
 
 // modelSupportsReasoning classifies a model, and says whether it could tell.
@@ -212,25 +234,41 @@ func modelSupportsReasoning(model string) (reasons, known bool) {
 	return major >= 5 && !strings.Contains(model, "chat"), true
 }
 
+// thinkingReporter reports the thinking default a request was sent with. The
+// LLM base implements it.
+type thinkingReporter interface {
+	ReportThinkingDefault(model, setting string, canThink bool, provider, settings string)
+}
+
 // reasoningFor is the reasoning the request carries, or nil to leave the field
 // off it.
 //
-// A configured value is sent as it stands. Nothing configured disables
-// reasoning on every model that reasons and accepts being told not to, or
-// lowers it to the least a model accepts (see defaultReasoningEffort). The
-// models that accept neither are left at the provider's own default, as is a
-// model that does not reason, which has no field to set. The default is off
-// rather than the API's own because this is a service for real-time voice,
-// where the thinking happens while somebody is listening to silence.
-func (c Config) reasoningFor() *ReasoningConfig {
+// A configured value is sent as it stands. Nothing configured sends the
+// model's entry in thinkingDefaults, its lowest effort, if it has one, for the
+// fastest responses; any other model runs at OpenAI's default. Reasoning set
+// through Extra wins over that default, so none is sent then. The first
+// request for each model reports the effort sent or, for a reasoning model
+// that is not listed, warns that it runs at OpenAI's default. report may be
+// nil, which reports nothing.
+func (c Config) reasoningFor(report thinkingReporter) *ReasoningConfig {
 	if c.Reasoning != nil && *c.Reasoning != (ReasoningConfig{}) {
 		r := *c.Reasoning
 		return &r
 	}
-	if effort := defaultReasoningEffort(c.Model); effort != "" {
-		return &ReasoningConfig{Effort: effort}
+	if _, ok := c.Extra["reasoning"]; ok {
+		return nil
 	}
-	return nil
+	var r *ReasoningConfig
+	var setting string
+	if effort, ok := thinkingDefaults[modelName(c.Model)]; ok {
+		r = &ReasoningConfig{Effort: effort}
+		setting = fmt.Sprintf(`reasoning={"effort":%q}`, effort)
+	}
+	if report != nil {
+		reasons, _ := modelSupportsReasoning(c.Model)
+		report.ReportThinkingDefault(c.Model, setting, reasons, "OpenAI", "Reasoning in responses.Config")
+	}
+	return r
 }
 
 // warnIfReasoningUnsupported says so when a service is configured to reason on
@@ -283,7 +321,7 @@ type request struct {
 // newRequest builds the request for a conversation, without the streaming or
 // continuation fields the transports set themselves.
 func (c Config) newRequest(
-	convo *frames.LLMContext, opts adapter.Options, withTools bool,
+	convo *frames.LLMContext, opts adapter.Options, withTools bool, report thinkingReporter,
 ) (request, error) {
 	var a responsesadapter.Adapter
 	// The configured instructions are this service's own default, standing in
@@ -305,7 +343,7 @@ func (c Config) newRequest(
 		Temperature:     c.Temperature,
 		TopP:            c.TopP,
 		ServiceTier:     c.ServiceTier,
-		Reasoning:       c.reasoningFor(),
+		Reasoning:       c.reasoningFor(report),
 	}
 	if withTools {
 		req.Tools = p.Tools
@@ -336,10 +374,10 @@ type textFormat struct {
 // the service has already checked it can enforce.
 func runInference(
 	ctx context.Context, cfg Config, client *http.Client,
-	convo *frames.LLMContext, opts llm.InferenceOptions,
+	convo *frames.LLMContext, opts llm.InferenceOptions, report thinkingReporter,
 ) (string, error) {
 	body, err := cfg.newRequest(
-		convo, adapter.Options{SystemInstruction: opts.SystemInstruction}, false,
+		convo, adapter.Options{SystemInstruction: opts.SystemInstruction}, false, report,
 	)
 	if err != nil {
 		return "", err

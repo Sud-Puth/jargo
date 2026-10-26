@@ -133,19 +133,6 @@ func TestNewParamsAppliesThinking(t *testing.T) {
 	}
 }
 
-func TestNewParamsOmitsThinkingWhenUnset(t *testing.T) {
-	s := NewLLM(Config{})
-	convo := frames.NewLLMContext("")
-	convo.AddUserMessage("hi")
-	b, err := json.Marshal(s.mustParams(t, convo))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "thinking") {
-		t.Fatalf("params JSON should omit thinking when unset:\n%s", string(b))
-	}
-}
-
 func TestToUsageMapsFields(t *testing.T) {
 	u := toUsage(sdk.Usage{
 		InputTokens:              100,
@@ -287,34 +274,5 @@ func TestSDKRefusalsClassify(t *testing.T) {
 				t.Errorf("category = %q, want %q", got, c.want)
 			}
 		})
-	}
-}
-
-// TestSonnetThinksByDefault covers which models get thinking turned off when the
-// caller configured none. Sonnet 5 and later think adaptively unless told not
-// to, which costs seconds before the first answer token; every other model is
-// left at Anthropic's own default.
-//
-// Ported from upstream's _sonnet_generation, whose pattern is unanchored so that
-// a Bedrock or Vertex id, which prefixes the name, still matches.
-func TestSonnetThinksByDefault(t *testing.T) {
-	for _, tc := range []struct {
-		model string
-		want  bool
-	}{
-		{"claude-sonnet-5", true},
-		{"claude-sonnet-5-20260101", true},
-		{"anthropic.claude-sonnet-5", true},
-		{"claude-sonnet-12", true},
-		{"claude-sonnet-4-5", false},
-		{"claude-3-5-sonnet-20241022", false},
-		{"claude-haiku-4-5", false},
-		{"claude-opus-5", false},
-		{"claude-fable-5", false},
-		{"", false},
-	} {
-		if got := sonnetThinksByDefault(tc.model); got != tc.want {
-			t.Errorf("sonnetThinksByDefault(%q) = %v, want %v", tc.model, got, tc.want)
-		}
 	}
 }

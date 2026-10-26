@@ -6,7 +6,6 @@ package anthropic
 
 import (
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,9 +19,11 @@ const defaultMaxTokens = 1024
 // "adaptive" lets the model decide when and how deeply to think and is the one
 // to prefer; "enabled" is the legacy manual mode sized by BudgetTokens, which
 // Claude 4.7 and later reject and Claude 4.5 and earlier accept only; "disabled"
-// turns thinking off. BudgetTokens applies only to "enabled".
+// turns thinking off on the models that allow it; "between_tools" is how Claude
+// Sonnet 5.5, which rejects "disabled", runs without up-front thinking, and no
+// other model accepts it. BudgetTokens applies only to "enabled".
 type ThinkingConfig struct {
-	Type         string `validate:"required,oneof=enabled disabled adaptive"`
+	Type         string `validate:"required,oneof=enabled disabled adaptive between_tools"`
 	BudgetTokens int
 	// Display is how thinking text comes back: "summarized" for readable
 	// thinking, which is what a thought frame carries, or "omitted" for thinking
@@ -49,11 +50,18 @@ type Config struct {
 	Temperature *float64
 	TopP        *float64
 	TopK        *int64
-	// Thinking configures thinking. Nil turns thinking off on Sonnet 5 and later,
-	// which otherwise decide per request whether to think and can spend seconds
-	// on it before the first answer token; Opus and Fable are left at Anthropic's
-	// own default, since choosing one of those is a decision to reason.
+	// Thinking configures thinking. If neither this nor Effort is set, the
+	// service sends the lowest thinking setting Anthropic documents for the
+	// model, for the fastest responses, and logs what it sent. Models it does
+	// not list run at Anthropic's default.
 	Thinking *ThinkingConfig `validate:"omitempty"`
+	// Effort is how much the model spends on its response, thinking included:
+	// "low", "medium", "high", "xhigh" or "max". It is sent as
+	// output_config.effort. Empty uses the model's default. Lower effort is
+	// Anthropic's recommended way to reduce thinking, and the only one on models
+	// whose thinking cannot be turned off. It is a plain string rather than a
+	// closed set, so a level the API gains can be asked for without a release.
+	Effort string
 	// RequestTimeout bounds a single request attempt, including the full stream;
 	// 0 leaves the SDK default. Keep it generously above the expected response
 	// time, since for a streaming request it caps the whole response.
@@ -87,37 +95,64 @@ type Config struct {
 // Validate reports whether the configuration is usable.
 func (c Config) Validate() error { return validate.Struct(c) }
 
-// sonnetThinksByDefaultFrom is the first Sonnet generation with adaptive
-// thinking on when a request omits the thinking parameter. Earlier Sonnets, and
-// every Haiku, have thinking off unless it is asked for.
-const sonnetThinksByDefaultFrom = 5
+// The thinking types and the effort level the thinking defaults are made of.
+const (
+	thinkingDisabled     = "disabled"
+	thinkingBetweenTools = "between_tools"
+	effortLow            = "low"
+)
 
-// sonnetGeneration is the generation of a Sonnet model id, and -1 for any other
-// model.
-//
-// Searched rather than anchored, because the service also takes Bedrock and
-// Vertex ids, which prefix the name ("anthropic.claude-sonnet-5"). Pre-4 ids
-// such as "claude-3-5-sonnet-20241022" put the generation before the name and do
-// not match; they do not think either.
-// A generation of more than two digits is not one: it is part of some other
-// identifier that happens to follow the name, and is left unmatched.
-func sonnetGeneration(model string) int {
-	m := sonnetGenerationRE.FindStringSubmatch(strings.ToLower(model))
-	if m == nil || len(m[1]) > 2 {
-		return -1
-	}
-	n, err := strconv.Atoi(m[1])
-	if err != nil {
-		return -1
-	}
-	return n
+// thinkingDefault is the request fields a model's lowest thinking setting is
+// sent as: a thinking type, or, on a model whose thinking cannot be turned off,
+// an effort.
+type thinkingDefault struct {
+	thinking string
+	effort   string
 }
 
-//nolint:gochecknoglobals // compiled once, read-only
-var sonnetGenerationRE = regexp.MustCompile(`sonnet-(\d+)`)
+// thinkingDefaults is the lowest thinking setting Anthropic documents for each
+// model, sent when the caller configures neither Thinking nor Effort, keyed by
+// model name. "between_tools" is Sonnet 5.5's lowest setting, and "disabled"
+// is already the default on the Claude 4 models.
+//
+//nolint:gochecknoglobals // a lookup table
+var thinkingDefaults = map[string]thinkingDefault{
+	"claude-fable-5-1":  {effort: effortLow},
+	"claude-fable-5":    {effort: effortLow},
+	"claude-opus-5-5":   {effort: effortLow},
+	"claude-opus-5":     {thinking: thinkingDisabled},
+	"claude-sonnet-5-5": {thinking: thinkingBetweenTools},
+	"claude-sonnet-5":   {thinking: thinkingDisabled},
+	"claude-haiku-5-5":  {thinking: thinkingDisabled},
+	"claude-opus-4-8":   {thinking: thinkingDisabled},
+	"claude-opus-4-7":   {thinking: thinkingDisabled},
+	"claude-opus-4-6":   {thinking: thinkingDisabled},
+	"claude-sonnet-4-6": {thinking: thinkingDisabled},
+	"claude-opus-4-5":   {thinking: thinkingDisabled},
+	"claude-sonnet-4-5": {thinking: thinkingDisabled},
+	"claude-haiku-4-5":  {thinking: thinkingDisabled},
+}
 
-// sonnetThinksByDefault reports whether the model thinks unless told not to.
-func sonnetThinksByDefault(model string) bool {
-	g := sonnetGeneration(model)
-	return g >= sonnetThinksByDefaultFrom
+// Suffixes a model id carries beyond the model's name.
+//
+//nolint:gochecknoglobals // compiled once, read-only
+var (
+	bedrockVersionSuffix = regexp.MustCompile(`-v\d+:\d+$`)
+	snapshotDateSuffix   = regexp.MustCompile(`-\d{8}$`)
+)
+
+// modelName is the name a model id refers to, the key it is looked up by in
+// thinkingDefaults.
+//
+// Bedrock and Vertex ids wrap the name, and a dated snapshot gets its model's
+// entry: "us.anthropic.claude-sonnet-5-20260630-v1:0", "claude-sonnet-5@20260630"
+// and "claude-sonnet-5-20260630" all name "claude-sonnet-5".
+func modelName(model string) string {
+	name := strings.ToLower(model)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	name, _, _ = strings.Cut(name, "@")
+	name = bedrockVersionSuffix.ReplaceAllString(name, "")
+	return snapshotDateSuffix.ReplaceAllString(name, "")
 }

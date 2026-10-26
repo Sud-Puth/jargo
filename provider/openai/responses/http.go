@@ -56,7 +56,7 @@ func (s *HTTPService) RunInference(
 	ctx context.Context, convo *frames.LLMContext, opts llm.InferenceOptions,
 ) (string, error) {
 	opts.ResponseSchema = s.CheckResponseSchema(ctx, opts.ResponseSchema)
-	return runInference(ctx, s.cfg, s.http, convo, opts)
+	return runInference(ctx, s.cfg, s.http, convo, opts, s)
 }
 
 // SupportsResponseSchema implements llm.ResponseSchemaSupporter.
@@ -70,7 +70,7 @@ func (s *HTTPService) ModelSupportsResponseSchema(model string) bool {
 
 // run issues one turn and feeds its event stream to the state machine.
 func (s *HTTPService) run(ctx context.Context, convo *frames.LLMContext, sink llm.Sink, withTools bool) error {
-	reqBody, err := s.cfg.newRequest(convo, adapter.Options{SystemInstruction: s.SystemInstruction()}, withTools)
+	reqBody, err := s.cfg.newRequest(convo, adapter.Options{SystemInstruction: s.SystemInstruction()}, withTools, s)
 	if err != nil {
 		return err
 	}

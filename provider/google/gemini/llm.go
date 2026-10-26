@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -266,36 +267,36 @@ func ThinkingParams(t *ThinkingConfig) map[string]any {
 	return params
 }
 
-// applyThinkingDefault turns thinking off on the flash models, unless the
-// configuration says otherwise.
+// applyThinkingDefault sends the model its lowest thinking setting when none
+// is configured.
 //
-// A flash model is the one a voice pipeline reaches for, and thinking costs it
-// the latency it was chosen for: the model emits nothing at all while it
-// thinks. The control differs by generation, so the default does too: the 2.5
-// series takes a budget of zero, and the 3 series takes the lowest thinking
-// level the model accepts. An image model is left alone, having no such control.
+// It applies the model's entry in thinkingDefaults, if it has one. A generation
+// config that already sets thinkingConfig, from the config or from Extra, is
+// left as it is. The first request for each model logs the setting sent or, for
+// a model that can think but is not listed, warns that it runs at Google's
+// default.
 func (s *Service) applyThinkingDefault(g map[string]any) {
-	model := s.cfg.Model
-	if _, set := g[keyThinkingConfig]; set || strings.Contains(model, "image") {
+	if _, set := g[keyThinkingConfig]; set {
 		return
 	}
-	switch {
-	case strings.HasPrefix(model, "gemini-2.5-flash"):
-		g[keyThinkingConfig] = map[string]any{"thinkingBudget": 0}
-	case strings.HasPrefix(model, "gemini-3") && strings.Contains(model, "flash"):
-		g[keyThinkingConfig] = map[string]any{"thinkingLevel": lowestThinkingLevel(model)}
+	name := modelName(s.cfg.Model)
+	var setting string
+	if d, ok := thinkingDefaults[name]; ok {
+		thinking := maps.Clone(d)
+		g[keyThinkingConfig] = thinking
+		setting = keyThinkingConfig + "=" + thinkingSetting(thinking)
 	}
+	s.ReportThinkingDefault(s.cfg.Model, setting, canThink(name), "Google", "Thinking in the service's Config")
 }
 
-// lowestThinkingLevel is the least a model will think. A model not named here
-// accepts "minimal", the fastest setting.
-func lowestThinkingLevel(model string) string {
-	for prefix, lowest := range lowestThinkingLevels {
-		if strings.HasPrefix(model, prefix) {
-			return lowest
-		}
+// thinkingSetting renders a thinking default as the JSON it is sent as, for the
+// log line that reports it.
+func thinkingSetting(thinking map[string]any) string {
+	b, err := json.Marshal(thinking)
+	if err != nil {
+		return fmt.Sprint(thinking)
 	}
-	return "minimal"
+	return string(b)
 }
 
 // warnIfThinkingBudgetIgnored reports a budget set on a model that reads a level
@@ -306,7 +307,10 @@ func (s *Service) warnIfThinkingBudgetIgnored() {
 	if s.cfg.Thinking == nil || s.cfg.Thinking.Budget == nil {
 		return
 	}
-	if !strings.HasPrefix(s.cfg.Model, "gemini-3") {
+	name := modelName(s.cfg.Model)
+	if !slices.ContainsFunc(modelsSupportingThinkingLevel, func(prefix string) bool {
+		return strings.HasPrefix(name, prefix)
+	}) {
 		return
 	}
 	slog.Warn("a thinking budget was set on a model that reads a thinking level",

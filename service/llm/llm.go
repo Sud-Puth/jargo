@@ -464,6 +464,12 @@ type Base struct {
 	appendedSystemInstructions []string
 	systemInstruction          string
 
+	// loggedThinkingDefaultModel is the model the thinking default was last
+	// reported for, so it is reported once per model rather than on every
+	// request. See thinking.go.
+	thinkingDefaultMu          sync.Mutex
+	loggedThinkingDefaultModel string
+
 	// settings are the general LLM settings, used when the provider keeps none of
 	// its own. A provider with settings of its own carries these fields inside
 	// them, so an update reaches whichever store the service actually has.

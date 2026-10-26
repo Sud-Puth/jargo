@@ -12,7 +12,7 @@ import (
 // mustRequest builds a request and fails the test if the conversion did.
 func mustRequest(t *testing.T, cfg Config, convo *frames.LLMContext) request {
 	t.Helper()
-	req, err := cfg.newRequest(convo, adapter.Options{}, false)
+	req, err := cfg.newRequest(convo, adapter.Options{}, false, nil)
 	if err != nil {
 		t.Fatalf("newRequest: %v", err)
 	}

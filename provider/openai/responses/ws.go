@@ -137,7 +137,7 @@ func (s *Service) RunInference(
 	ctx context.Context, convo *frames.LLMContext, opts llm.InferenceOptions,
 ) (string, error) {
 	opts.ResponseSchema = s.CheckResponseSchema(ctx, opts.ResponseSchema)
-	return runInference(ctx, s.cfg, s.http, convo, opts)
+	return runInference(ctx, s.cfg, s.http, convo, opts, s)
 }
 
 // SupportsResponseSchema implements llm.ResponseSchemaSupporter.
@@ -189,7 +189,7 @@ func (s *Service) turn(ctx context.Context, convo *frames.LLMContext, sink llm.S
 		return err
 	}
 
-	req, err := s.cfg.newRequest(convo, adapter.Options{SystemInstruction: s.SystemInstruction()}, withTools)
+	req, err := s.cfg.newRequest(convo, adapter.Options{SystemInstruction: s.SystemInstruction()}, withTools, s)
 	if err != nil {
 		return err
 	}

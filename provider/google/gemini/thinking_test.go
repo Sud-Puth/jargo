@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,58 +25,154 @@ func thinkingOf(t *testing.T, srv *genServer) (map[string]any, bool) {
 	return thinking, ok
 }
 
-// TestThinkingIsOffByDefaultOnFlash covers the low-latency default. A flash
-// model is the one a voice pipeline reaches for, and a model that thinks emits
-// nothing at all while it does, so the answer starts later than it needs to.
-// The control differs by generation, which is why the default does too.
-func TestThinkingIsOffByDefaultOnFlash(t *testing.T) {
+// thinkingSent runs one generation on model and returns the thinking
+// configuration the request carried, or nil when it carried none.
+func thinkingSent(t *testing.T, model string) map[string]any {
+	t.Helper()
+	srv := newGenServer(t, sse(textChunk("ok")))
+	generate(t, srv, Config{APIKey: "k", Model: model})
+	thinking, _ := thinkingOf(t, srv)
+	return thinking
+}
+
+// TestTheLowestThinkingSettingIsSentPerModel covers the low-latency default: each
+// listed model gets the lowest thinking setting Google documents for it. The
+// 2.5 series takes a budget, where zero turns thinking off and 128 tokens is
+// the least 2.5 Pro accepts; Gemini 3 and later and Gemma 4 take a level, and
+// the models that reject "minimal" get "low".
+func TestTheLowestThinkingSettingIsSentPerModel(t *testing.T) {
 	cases := []struct {
 		model string
 		want  map[string]any
 	}{
 		{"gemini-2.5-flash", map[string]any{"thinkingBudget": float64(0)}},
 		{"gemini-2.5-flash-lite", map[string]any{"thinkingBudget": float64(0)}},
-		{"gemini-3-flash", map[string]any{"thinkingLevel": "minimal"}},
+		{"gemini-2.5-pro", map[string]any{"thinkingBudget": float64(128)}},
 		{"gemini-3.6-flash", map[string]any{"thinkingLevel": "minimal"}},
-		// 3.7 Flash refuses "minimal", so the lowest it takes is used instead.
+		{"gemini-3.5-flash-lite", map[string]any{"thinkingLevel": "minimal"}},
+		{"gemma-4-31b-it", map[string]any{"thinkingLevel": "minimal"}},
+		{"gemini-3.1-pro-preview", map[string]any{"thinkingLevel": "low"}},
 		{"gemini-3.7-flash", map[string]any{"thinkingLevel": "low"}},
-		// A flash model this package has never heard of takes the fastest
-		// setting, which is what an unlisted one is assumed to accept.
-		{"gemini-3.9-flash", map[string]any{"thinkingLevel": "minimal"}},
+		{"gemini-3.8-flash", map[string]any{"thinkingLevel": "low"}},
+		{"gemini-4-argon", map[string]any{"thinkingLevel": "low"}},
+		// Resource paths and version suffixes name the same model.
+		{"models/gemini-3.6-flash", map[string]any{"thinkingLevel": "minimal"}},
+		{"publishers/google/models/gemini-3.6-flash", map[string]any{"thinkingLevel": "minimal"}},
+		{"gemini-2.5-flash-001", map[string]any{"thinkingBudget": float64(0)}},
 	}
 	for _, c := range cases {
 		t.Run(c.model, func(t *testing.T) {
-			srv := newGenServer(t, sse(textChunk("ok")))
-			generate(t, srv, Config{APIKey: "k", Model: c.model})
-
-			thinking, ok := thinkingOf(t, srv)
-			if !ok {
-				t.Fatalf("no thinking configuration was sent for %s", c.model)
-			}
-			for k, want := range c.want {
-				if thinking[k] != want {
-					t.Errorf("%s = %v, want %v", k, thinking[k], want)
-				}
+			if got := thinkingSent(t, c.model); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("thinking configuration = %v, want %v", got, c.want)
 			}
 		})
 	}
 }
 
-// TestThinkingIsLeftAloneOnOtherModels covers the models the default does not
-// apply to: a pro model is chosen for its reasoning, and an image model has no
-// such control at all.
-func TestThinkingIsLeftAloneOnOtherModels(t *testing.T) {
-	// The image models include a flash one, which would otherwise be given a
-	// thinking level by the rule above it.
-	for _, model := range []string{"gemini-3-pro", "gemini-2.5-pro", "gemini-3.1-flash-image"} {
+// TestUnlistedModelsRunAtGooglesDefault covers the models with no entry: only
+// listed models get a thinking default, so a new model is never guessed at.
+func TestUnlistedModelsRunAtGooglesDefault(t *testing.T) {
+	for _, model := range []string{"gemini-3.9-flash", "gemini-flash-latest", "gemini-3.1-flash-image"} {
 		t.Run(model, func(t *testing.T) {
-			srv := newGenServer(t, sse(textChunk("ok")))
-			generate(t, srv, Config{APIKey: "k", Model: model})
-
-			if thinking, ok := thinkingOf(t, srv); ok {
-				t.Errorf("thinking configuration = %v, want none for %s", thinking, model)
+			if got := thinkingSent(t, model); got != nil {
+				t.Errorf("thinking configuration = %v, want none", got)
 			}
 		})
+	}
+}
+
+// infoLogs swaps the default logger for one writing INFO and above into a
+// buffer and returns a reader for what was logged, restoring the logger when
+// the test ends.
+func infoLogs(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf.String
+}
+
+// logLines builds the generation config twice for each model in turn, on one
+// service, and returns what it logged.
+func logLines(t *testing.T, models ...string) []string {
+	t.Helper()
+	logged := infoLogs(t)
+	s := NewLLM(Config{APIKey: "k", Model: models[0]})
+	for _, model := range models {
+		s.cfg.Model = model
+		s.genConfig()
+		s.genConfig()
+	}
+	out := strings.TrimSpace(logged())
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+// TestTheAppliedDefaultIsLoggedOncePerModel covers what the developer is told:
+// what was sent, and when to change it, once per model.
+func TestTheAppliedDefaultIsLoggedOncePerModel(t *testing.T) {
+	lines := logLines(t, "gemini-3.6-flash", "gemini-3.8-flash")
+
+	if len(lines) != 2 {
+		t.Fatalf("logged %d lines, want 2:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "level=INFO") {
+			t.Errorf("not at INFO: %s", line)
+		}
+	}
+	want := `model=gemini-3.6-flash setting="thinkingConfig={\"thinkingLevel\":\"minimal\"}"`
+	if !strings.Contains(lines[0], want) {
+		t.Errorf("line 0 = %s, want it to contain %s", lines[0], want)
+	}
+	if !strings.Contains(lines[0], "multistep reasoning") || !strings.Contains(lines[0], "configure=") {
+		t.Errorf("line 0 does not say what to set: %s", lines[0])
+	}
+	if !strings.Contains(lines[1], "model=gemini-3.8-flash ") {
+		t.Errorf("line 1 = %s, want it about gemini-3.8-flash", lines[1])
+	}
+}
+
+// TestAnUnlistedModelThatCanThinkIsWarnedAboutOnce covers a model without a
+// default, which may think before replying, so the developer hears about it.
+func TestAnUnlistedModelThatCanThinkIsWarnedAboutOnce(t *testing.T) {
+	for _, model := range []string{"gemini-3.9-flash", "gemini-flash-latest", "gemma-4-e4b-it"} {
+		t.Run(model, func(t *testing.T) {
+			lines := logLines(t, model)
+			if len(lines) != 1 {
+				t.Fatalf("logged %d lines, want 1:\n%s", len(lines), strings.Join(lines, "\n"))
+			}
+			if !strings.Contains(lines[0], "level=WARN") || !strings.Contains(lines[0], "no thinking default") ||
+				!strings.Contains(lines[0], "model="+model) {
+				t.Errorf("line = %s, want a warning about %s", lines[0], model)
+			}
+		})
+	}
+}
+
+// TestNothingIsLoggedForAModelThatCannotThink covers the models without
+// thinking, which have no latency to recover.
+func TestNothingIsLoggedForAModelThatCannotThink(t *testing.T) {
+	for _, model := range []string{"gemini-2.0-flash", "gemini-3.1-flash-image"} {
+		t.Run(model, func(t *testing.T) {
+			if lines := logLines(t, model); len(lines) != 0 {
+				t.Errorf("logged %v, want nothing", lines)
+			}
+		})
+	}
+}
+
+// TestNothingIsLoggedWhenThinkingIsConfigured covers an explicit setting, which
+// is the developer's choice and needs no comment.
+func TestNothingIsLoggedWhenThinkingIsConfigured(t *testing.T) {
+	logged := infoLogs(t)
+	s := NewLLM(Config{APIKey: "k", Model: "gemini-3.9-flash", Thinking: &ThinkingConfig{Level: "low"}})
+	s.genConfig()
+	if logged() != "" {
+		t.Errorf("logged %q, want nothing", logged())
 	}
 }
 
@@ -391,6 +488,22 @@ func TestThinkingBudgetOnAThinkingLevelModelWarns(t *testing.T) {
 
 	if !strings.Contains(logged(), "thinking budget") {
 		t.Errorf("logs = %q, want the budget flagged on a model that reads a level", logged())
+	}
+}
+
+// TestThinkingBudgetOnGemma4AndGemini4Warns covers the other models that take a
+// level: Gemma 4, named here by resource path, and Gemini 4, which rejects a
+// budget.
+func TestThinkingBudgetOnGemma4AndGemini4Warns(t *testing.T) {
+	for _, model := range []string{"models/gemma-4-31b-it", "gemini-4-argon"} {
+		t.Run(model, func(t *testing.T) {
+			logged := capturedWarnings(t)
+			budget := 0
+			NewLLM(Config{APIKey: "k", Model: model, Thinking: &ThinkingConfig{Budget: &budget}})
+			if !strings.Contains(logged(), "thinking budget") {
+				t.Errorf("logs = %q, want the budget flagged", logged())
+			}
+		})
 	}
 }
 
