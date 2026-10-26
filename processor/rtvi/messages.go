@@ -340,8 +340,17 @@ type SpokenProgressData struct {
 type BotOutputData struct {
 	// Text is the segment as the client should render it.
 	Text string `json:"text"`
-	// AggregatedBy is the unit the text stands for: a sentence, a word, or a
-	// name a pattern aggregator gave it.
+	// OutputType is what kind of text the message holds: a sentence, a word, a
+	// backchannel, or a custom type such as "code" that a pattern aggregator
+	// gave it.
+	OutputType frames.TextType `json:"output_type"`
+	// TextType is the same as OutputType, sent for the clients that read it.
+	//
+	// Deprecated: read OutputType. BotOutput fills it from OutputType.
+	TextType frames.TextType `json:"text_type"`
+	// AggregatedBy is the same as OutputType, sent for the clients that read it.
+	//
+	// Deprecated: read OutputType. BotOutput fills it from OutputType.
 	AggregatedBy frames.TextType `json:"aggregated_by"`
 	// SegmentID identifies the segment, so progress reports can be matched to
 	// the text they are about.
@@ -356,9 +365,46 @@ type BotOutputData struct {
 	SpokenProgress *SpokenProgressData `json:"spoken_progress,omitempty"`
 }
 
-// BotOutput builds a bot-output message.
+// BotOutput builds a bot-output message. Whichever of OutputType and its
+// deprecated names is missing is filled from the others, since the message
+// carries all three.
 func BotOutput(d BotOutputData) Message {
-	return newMessage(TypeBotOutput, "", d)
+	return newMessage(TypeBotOutput, "", d.withOutputType())
+}
+
+// withOutputType fills whichever of OutputType and its deprecated names are
+// missing from the first one given.
+func (d BotOutputData) withOutputType() BotOutputData {
+	//nolint:staticcheck // the deprecated names are still sent
+	for _, given := range []frames.TextType{d.OutputType, d.TextType, d.AggregatedBy} {
+		if given == "" {
+			continue
+		}
+		if d.OutputType == "" {
+			d.OutputType = given
+		}
+		if d.TextType == "" { //nolint:staticcheck // the deprecated names are still sent
+			d.TextType = given
+		}
+		if d.AggregatedBy == "" { //nolint:staticcheck // the deprecated names are still sent
+			d.AggregatedBy = given
+		}
+		break
+	}
+	return d
+}
+
+// UnmarshalJSON decodes a bot-output payload, filling whichever of OutputType
+// and its deprecated names is missing, so a message from an older bot reads
+// the same.
+func (d *BotOutputData) UnmarshalJSON(data []byte) error {
+	type plain BotOutputData
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*d = BotOutputData(p).withOutputType()
+	return nil
 }
 
 // BotTranscription builds a bot-transcription message.

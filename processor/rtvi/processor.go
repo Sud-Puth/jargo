@@ -521,7 +521,7 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 		spoken, willBeSpoken := seg.spoken, agg.WillBeSpoken
 		d := BotOutputData{
 			Text:         text,
-			AggregatedBy: agg.TextType,
+			OutputType:   agg.TextType,
 			SegmentID:    &id,
 			Spoken:       &spoken,
 			WillBeSpoken: &willBeSpoken,
@@ -584,7 +584,7 @@ func (o *Observer) progressMessages(fr *frames.AggregatedTextProgressFrame) []Me
 	}
 	return []Message{BotOutput(BotOutputData{
 		Text:         seg.Text,
-		AggregatedBy: fr.TextType,
+		OutputType:   fr.TextType,
 		SegmentID:    &id,
 		WillBeSpoken: &willBeSpoken,
 		SpokenStatus: status,
