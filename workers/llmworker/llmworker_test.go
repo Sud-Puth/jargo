@@ -654,3 +654,50 @@ func TestActivationArgsRoundTrip(t *testing.T) {
 		t.Errorf("run_llm = %v, want false", got.RunLLM)
 	}
 }
+
+// TestActivationOverTheBusReachesTheWorker checks a worker activated by another
+// one, over the bus and under a runner, does what it does on activation. The
+// base calls the hook through the worker it is bound to, so an LLM worker that
+// did not bind itself would be activated without its tools or messages.
+func TestActivationOverTheBusReachesTheWorker(t *testing.T) {
+	ctx := t.Context()
+	model := newRecordingLLM()
+	sk := newSink()
+	off := false
+	w := llmworker.New(llmworker.Config{
+		Name:     "llm-worker",
+		LLM:      model,
+		Pipeline: pipeline.New(model, sk),
+		Tools:    []frames.Tool{{Name: "advertised", Parameters: json.RawMessage(`{}`)}},
+		WorkerConfig: pipeline.WorkerConfig{
+			EnableRTVI: &off, EnableTurnTracking: &off, IdleTimeout: -1,
+		},
+	})
+	caller := workers.New(workers.Config{Name: "caller"}, nil)
+
+	runner := workers.NewRunner(workers.RunnerConfig{HandleInterrupt: &off})
+	runner.AddWorkers(ctx, w, caller)
+	runDone := make(chan error, 1)
+	go func() { runDone <- runner.Run(ctx, workers.RunOptions{}) }()
+	t.Cleanup(func() {
+		runner.Cancel(context.Background(), "")
+		select {
+		case <-runDone:
+		case <-time.After(5 * time.Second):
+			t.Error("the runner did not finish")
+		}
+	})
+
+	// An activation that arrives before the worker has started is held until it
+	// has, so there is no need to wait for it first.
+	caller.ActivateWorker(ctx, "llm-worker", workers.ActivateOptions{Args: llmworker.ActivationArgs{
+		Messages: []map[string]any{{"role": "user", "content": "bonjour"}},
+	}})
+
+	if !waitFor(3*time.Second, func() bool { return slices.Contains(sk.appended(), "bonjour") }) {
+		t.Errorf("the pipeline saw %v, want the activation's message appended", sk.appended())
+	}
+	if !sk.sawTools() {
+		t.Error("the model was never told which tools it may call")
+	}
+}

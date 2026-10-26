@@ -25,7 +25,9 @@
 //
 // A worker that overrides a hook the base calls should call the base's version
 // too, the way Greeter would call g.Base.OnJobRequest, unless it means to
-// replace the behavior entirely.
+// replace the behavior entirely. A worker built on another worker rather than on
+// Base directly overrides that worker's hooks the same way, and binds itself
+// with Bind so the base reaches them.
 package workers
 
 import (
@@ -305,6 +307,19 @@ func New(cfg Config, self Worker) *Base {
 	w.Register(EventWorkerFailed, false)
 
 	return w
+}
+
+// Bind makes self the worker this base reaches its hooks through.
+//
+// A worker built on another, an LLM worker on a pipeline worker say, embeds it
+// and overrides some of its hooks. The base only knows the worker it was built
+// for, so the outer one binds itself once it is built, or its overrides are
+// never called. Bind in the constructor, before the worker is added to a
+// runner: the base reads self without a lock once it is running.
+func (w *Base) Bind(self Worker) {
+	if self != nil {
+		w.self = self
+	}
 }
 
 // typeNameOf names a worker after its own type, for one built without a name.

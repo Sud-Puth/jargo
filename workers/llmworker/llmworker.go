@@ -127,6 +127,9 @@ func New(cfg Config) *Worker {
 		pipe = pipeline.New(cfg.LLM)
 	}
 	w.Worker = pipeline.NewWorker(pipe, wc)
+	// The base reaches the hooks through the worker it is bound to, so this one
+	// binds itself for its OnActivated to be called.
+	w.Bind(w)
 	return w
 }
 
