@@ -112,3 +112,33 @@ func TestAggregatedTextCarriesTheTextItWasCutFrom(t *testing.T) {
 		t.Errorf("raw text = %q, want the delimiters kept", code.RawText)
 	}
 }
+
+// TestASpeakFrameCarriesItsTextType checks the text a TTSSpeakFrame is spoken
+// as carries the frame's text type, so a custom type such as "status" can be
+// told apart from the bot's replies, and kept from the client.
+func TestASpeakFrameCarriesItsTextType(t *testing.T) {
+	got := collectAggregated(t, nil, func(task *pipeline.Worker) {
+		speak := frames.NewTTSSpeakFrame("One moment.")
+		speak.TextType = "status"
+		task.QueueFrame(speak)
+	})
+
+	if len(got) == 0 {
+		t.Fatal("no aggregated text reached the pipeline")
+	}
+	if got[0].TextType != "status" {
+		t.Errorf("text type = %q, want the speak frame's status", got[0].TextType)
+	}
+}
+
+// TestASpeakFrameIsASentenceByDefault checks a TTSSpeakFrame left at its
+// default is spoken as a sentence.
+func TestASpeakFrameIsASentenceByDefault(t *testing.T) {
+	got := collectAggregated(t, nil, func(task *pipeline.Worker) {
+		task.QueueFrame(frames.NewTTSSpeakFrame("Hello."))
+	})
+
+	if len(got) == 0 || got[0].TextType != frames.TextTypeSentence {
+		t.Errorf("aggregated = %v, want a sentence", got)
+	}
+}

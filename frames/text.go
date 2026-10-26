@@ -107,15 +107,21 @@ type TTSSpeakFrame struct {
 	// acknowledgement, which would otherwise start the context on an assistant
 	// turn).
 	AppendToContext bool
+	// TextType is the text type of the text frames the TTS service pushes for
+	// the spoken text, a sentence by default. A custom type lets them be told
+	// apart, for example to keep them from the client with
+	// rtvi.ObserverParams.SkipTextTypes. Empty is a sentence.
+	TextType TextType
 }
 
-// NewTTSSpeakFrame builds a TTSSpeakFrame that speaks text, appending it to the
-// LLM context by default.
+// NewTTSSpeakFrame builds a TTSSpeakFrame that speaks text as a sentence,
+// appending it to the LLM context by default.
 func NewTTSSpeakFrame(text string) *TTSSpeakFrame {
 	return &TTSSpeakFrame{
 		BaseDataFrame:   NewBaseDataFrame("TTSSpeakFrame"),
 		Text:            text,
 		AppendToContext: true,
+		TextType:        TextTypeSentence,
 	}
 }
 

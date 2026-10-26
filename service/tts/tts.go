@@ -987,7 +987,11 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	}
 	// A fixed utterance was never aggregated, so it stands as one sentence and
 	// the text is its own written form.
-	spoken := ttstext.Aggregation{Text: fr.Text, Type: frames.TextTypeSentence}
+	textType := fr.TextType
+	if textType == "" {
+		textType = frames.TextTypeSentence
+	}
+	spoken := ttstext.Aggregation{Text: fr.Text, Type: textType}
 	if err := b.pushTTSFrames(ctx, spoken, interruptible); err != nil {
 		return err
 	}
