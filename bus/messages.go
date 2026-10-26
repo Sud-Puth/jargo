@@ -102,7 +102,7 @@ type TTSSpeakMessage struct {
 // keeps saying it.
 type FlushProgressMessage struct {
 	BaseDataMessage
-	// FlushID is the id of the probe being reported on.
+	// FlushID is the FlushID of the probe being reported on.
 	FlushID uint64
 }
 

@@ -742,14 +742,15 @@ const flushProgressPeriod = time.Second
 var ErrFlushNoProgress = errors.New("pipeline flush gave up with nothing happening")
 
 // Flush waits for the pipeline to drain: it queues a PipelineFlushFrame probe
-// and blocks until that probe has traveled down to the sink, back up to the
-// source, and down to the sink again. By then every frame queued ahead of it has
-// been processed, along with anything a processor started by pushing upstream.
-// Use it to let the pipeline settle, after an interruption say, before injecting
-// new work.
+// down to the sink, then pushes a new probe back up to the source and a third
+// down to the sink again, and blocks until that last one arrives. By then every
+// frame queued ahead of the flush has been processed, along with anything a
+// processor started by pushing upstream. Use it to let the pipeline settle,
+// after an interruption say, before injecting new work.
 //
-// The probe goes on the worker's queue, behind whatever is already waiting
-// there, so a frame handed to QueueFrame just before this call is covered too.
+// The first probe goes on the worker's queue, behind whatever is already
+// waiting there, so a frame handed to QueueFrame just before this call is
+// covered too.
 //
 // It returns ctx.Err() if ctx is done first, and ErrFlushNoProgress if the
 // pipeline goes quiet for FlushNoProgressTimeout without the probe coming back.
@@ -771,11 +772,11 @@ func (t *Worker) Flush(ctx context.Context) error {
 	probe.Origin = t.Name()
 
 	t.flushMu.Lock()
-	t.flushProgress[probe.ID()] = 0
+	t.flushProgress[probe.FlushID] = 0
 	t.flushMu.Unlock()
 	defer func() {
 		t.flushMu.Lock()
-		delete(t.flushProgress, probe.ID())
+		delete(t.flushProgress, probe.FlushID)
 		t.flushMu.Unlock()
 	}()
 
@@ -783,7 +784,7 @@ func (t *Worker) Flush(ctx context.Context) error {
 	t.QueueFrame(probe)
 
 	for {
-		atSink, reports := t.framesAtSink.Load(), t.flushReports(probe.ID())
+		atSink, reports := t.framesAtSink.Load(), t.flushReports(probe.FlushID)
 		timer := time.NewTimer(FlushNoProgressTimeout)
 		select {
 		case <-probe.Done:
@@ -793,7 +794,7 @@ func (t *Worker) Flush(ctx context.Context) error {
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
-			reported := t.flushReports(probe.ID()) != reports
+			reported := t.flushReports(probe.FlushID) != reports
 			if t.framesAtSink.Load() == atSink && !reported {
 				slog.WarnContext(ctx, "pipeline flush gave up with nothing happening",
 					"worker", t.Name(), "after", FlushNoProgressTimeout)
@@ -826,18 +827,19 @@ func (t *Worker) TrackFlushProbe(f *frames.PipelineFlushFrame) {
 		return
 	}
 	t.flushMu.Lock()
-	t.foreignProbes[f.ID()] = f.Origin
+	t.foreignProbes[f.FlushID] = f.Origin
 	t.flushMu.Unlock()
 }
 
-// advanceFlushProbe moves a probe along its trip, settling it once it is done.
+// advanceFlushProbe moves a flush along its trip, settling it once it is done.
 //
-// The probe travels down to the sink, back up to the source, then down again,
-// and only the second arrival at the sink settles it. The extra leg is what makes
-// the probe wait for work a processor starts by pushing upstream: an
+// The flush travels down to the sink, back up to the source, then down again,
+// and only the returning probe's arrival at the sink settles it. The extra leg is
+// what makes the flush wait for work a processor starts by pushing upstream: an
 // LLMContextFrame pushed up after a function call result, say, whose response
-// only comes back down afterwards. A probe that stopped at the source would
-// return while that response was still being generated.
+// only comes back down afterwards. A flush that stopped at the source would
+// return while that response was still being generated. Each leg is pushed as a
+// new probe with the same FlushID.
 func (t *Worker) advanceFlushProbe(
 	ctx context.Context, probe *frames.PipelineFlushFrame, atSink bool,
 ) error {
@@ -845,17 +847,16 @@ func (t *Worker) advanceFlushProbe(
 	case !atSink:
 		slog.DebugContext(ctx, "flush probe reached the source, sending it down again",
 			"worker", t.Name())
-		probe.Returning = true
-		return t.source.PushFrame(ctx, probe, processor.Downstream)
+		return t.source.PushFrame(ctx, probe.NextLeg(true), processor.Downstream)
 	case !probe.Returning:
 		slog.DebugContext(ctx, "flush probe reached the sink, bouncing it upstream",
 			"worker", t.Name())
-		return t.sink.PushFrame(ctx, probe, processor.Upstream)
+		return t.sink.PushFrame(ctx, probe.NextLeg(false), processor.Upstream)
 	default:
 		slog.DebugContext(ctx, "flush probe reached the sink again, the pipeline has drained",
 			"worker", t.Name())
 		t.flushMu.Lock()
-		delete(t.foreignProbes, probe.ID())
+		delete(t.foreignProbes, probe.FlushID)
 		t.flushMu.Unlock()
 		probe.CloseDone()
 		return nil

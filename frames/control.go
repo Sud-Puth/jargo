@@ -43,52 +43,94 @@ func NewStopFrame() *StopFrame {
 
 // PipelineFlushFrame is a probe that reports when the pipeline has drained.
 //
-// It is pushed downstream; the worker's sink bounces it back upstream, the
-// source turns it around, and the worker closes Done when it reaches the sink a
-// second time. By then every frame queued ahead of it has been processed, along
-// with anything a processor started by pushing upstream. The extra leg is what
-// makes the probe wait for that second kind of work: an LLM run triggered by a
-// function call result, say, whose response only comes back down after the
-// turnaround. A probe that stopped at the source would return while that response
-// was still being generated, or still being synthesized.
+// A flush makes three legs, each pushed as a new probe: down to the worker's
+// sink, back up to the source, and down to the sink again, where the worker
+// closes Done. All three probes carry the same FlushID. By then every frame
+// queued ahead of the flush has been processed, along with anything a processor
+// started by pushing upstream. The extra leg is what makes the flush wait for
+// that second kind of work: an LLM run triggered by a function call result, say,
+// whose response only comes back down after the turnaround. A flush that stopped
+// at the source would return while that response was still being generated, or
+// still being synthesized.
+//
+// Each leg is a new frame because a processor may let a frame through once
+// only: a parallel pipeline passes on the first copy of a frame its branches
+// emit and drops the rest, so the probe that went down through it would be
+// dropped on its way back up.
 //
 // Waiting on Done therefore means the pipeline has settled, which is useful after
 // an interruption before injecting new work.
 //
-// It is uninterruptible so the probe survives an InterruptionFrame and still
-// completes its trip; otherwise a waiter would block forever. Done is carried on
-// the frame so concurrent flushes stay isolated, each awaiting its own probe.
+// It is uninterruptible so the probe survives an InterruptionFrame and the flush
+// still completes its trip; otherwise a waiter would block forever. Done is
+// carried on the frame so concurrent flushes stay isolated, each awaiting its
+// own.
 type PipelineFlushFrame struct {
 	BaseControlFrame
 	UninterruptibleMixin
-	// Done is closed by the worker once the probe has completed its trip.
+	// Done is closed by the worker once the last probe of the flush reaches the
+	// sink. The probes of all three legs share it.
 	Done chan struct{}
-	// Returning reports that the probe is on its second pass downstream, after
-	// having been back up to the source.
+	// Returning reports that the probe is on the last leg, back downstream
+	// after the flush has been up to the source.
 	Returning bool
 	// Origin names the worker that started the flush. A probe that crosses into
 	// another pipeline is answered there, out of sight of whoever is waiting, so
 	// the answering worker reports progress back to this name.
 	Origin string
+	// FlushID identifies the flush, shared by the probes of all its legs.
+	FlushID uint64
 
-	closeOnce sync.Once
+	// closeOnce closes Done once, whichever probe of the flush does it. Shared
+	// by the probes of all its legs.
+	closeOnce *sync.Once
 }
 
-// NewPipelineFlushFrame builds a PipelineFlushFrame with a fresh Done channel.
-// Wait on Done (against a context) to know the pipeline has drained.
+// NewPipelineFlushFrame builds the first probe of a flush, with a fresh Done
+// channel and a FlushID of its own. Wait on Done (against a context) to know
+// the pipeline has drained.
 func NewPipelineFlushFrame() *PipelineFlushFrame {
-	return &PipelineFlushFrame{
+	f := &PipelineFlushFrame{
 		BaseControlFrame: NewBaseControlFrame("PipelineFlushFrame"),
 		Done:             make(chan struct{}),
+		closeOnce:        &sync.Once{},
+	}
+	f.FlushID = f.ID()
+	return f
+}
+
+// NextLeg builds the probe for the next leg of the flush: a new frame carrying
+// the same flush, which returning marks as the last leg.
+func (f *PipelineFlushFrame) NextLeg(returning bool) *PipelineFlushFrame {
+	return &PipelineFlushFrame{
+		BaseControlFrame: NewBaseControlFrame("PipelineFlushFrame"),
+		Done:             f.Done,
+		Returning:        returning,
+		Origin:           f.Origin,
+		FlushID:          f.FlushID,
+		closeOnce:        f.closeOnce,
 	}
 }
 
-// CloseDone closes Done, releasing whoever is waiting on the probe. The worker
-// calls it when the probe completes its trip. Unlike the rest of a frame's
-// state this is safe to call from any goroutine, and more than once: the probe is
-// a deliberate handoff between the waiter and the pipeline.
+// CloseDone closes Done, releasing whoever is waiting on the flush. The worker
+// calls it when the last probe completes the trip. Unlike the rest of a frame's
+// state this is safe to call from any goroutine, and more than once, on any
+// probe of the flush: the probe is a deliberate handoff between the waiter and
+// the pipeline. A probe with no Done channel, decoded from another process, has
+// nobody here to release.
 func (f *PipelineFlushFrame) CloseDone() {
+	if f.Done == nil {
+		return
+	}
+	if f.closeOnce == nil {
+		f.closeOnce = &sync.Once{}
+	}
 	f.closeOnce.Do(func() { close(f.Done) })
+}
+
+// String implements fmt.Stringer.
+func (f *PipelineFlushFrame) String() string {
+	return fmt.Sprintf("%s(flush_id: %d, returning: %t)", f.Name(), f.FlushID, f.Returning)
 }
 
 // ProposedUserStoppedSpeakingFrame proposes that the user's turn has ended. Like
