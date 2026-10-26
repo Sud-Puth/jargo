@@ -15,6 +15,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Observers can release what they hold.** An observer implementing
+  `processor.CleanupObserver` is cleaned up once the pipeline worker stops
+  reporting to it, and when it is removed while the pipeline runs. Cleaning up
+  is best effort: one that fails is logged and the rest are still cleaned up.
+  The turn-tracking observer cancels its turn-end timer there.
+
 - **Perplexity's Agent API.** `perplexity.NewAgentLLM` answers with web search
   over the OpenAI Responses protocol, with function calling and multi-turn
   context. It defaults to `openai/gpt-5.6-luna` with the `web_search` tool
@@ -155,6 +161,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   last, so nothing rewrites the markup it inserts.
 
 ### Changed
+
+- **Pausing a TTS service waits for its audio contexts, not the bot.** With
+  `PauseOptions.Enabled`, the service holds frames after a reply, or after a
+  `TTSSpeakFrame` outside one, while any audio context is open, and releases
+  them once the last one ends; bot-speaking frames no longer play a part.
+  Pausing is for providers whose audio does not carry its request's context ID.
 
 - **Each model gets the lowest thinking setting its provider documents.** When
   a request configures no thinking of its own, the Anthropic, Gemini (and
@@ -425,6 +437,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   replacement: choose another TTS provider.
 
 ### Fixed
+
+- **A WebSocket send to a peer that stopped reading is bounded.** It waited on
+  the full write buffer until TCP gave up, holding up the service and every
+  processor after it. Each send on a dialed connection now gives up after 5
+  seconds (`wsutil.DefaultSendTimeout`, changed with `Conn.SetSendTimeout`),
+  dropping the connection so the service reconnects.
+
+- **Deepgram says why it refused a connection.** The Flux STT and TTS services
+  report a refused handshake with the reason Deepgram puts in its `dg-error`
+  header, such as "Deepgram refused the connection (HTTP 400): eot_threshold
+  must be between 0.5 and 1, inclusive.", still classified by the status.
+  `wsutil.HandshakeError` now carries the refusing response's header.
+
+- **A cancel stops a pipeline that is still setting up.** Canceling a worker,
+  or ending its context, while a processor was still connecting waited for
+  every processor to finish setting up. The setup is now abandoned at once:
+  the processors still setting up are told to stop and never start, and the
+  pipeline is only cleaned up.
+
+- **Cleaning up from an object's own event handler returns.** It waited for
+  that handler, among the others, to finish.
+
+- **A TTS provider replacing its connection closes the contexts open on the
+  old one.** Their audio never arrives on the new connection, so the reply
+  waited out the stop-frame timeout, and the rest of the turn reused a context
+  ID the new connection had never seen. The new `ReplaceConnection` on the
+  audio context host closes them and moves the turn to a new context ID; the
+  Cartesia and ElevenLabs realtime services call it.
+
+- **Text filters are reset when a reply ends.** A `MarkdownFilter` with
+  `FilterCode` muted every reply after one ended inside an open code block.
+
+- **A transform that leaves only whitespace leaves the text unspoken.** It sent
+  a lone space to the synthesizer, after announcing the text as about to be
+  spoken.
+
+- **A late async tool result is delivered on its own.** The guidance now tells
+  the model to deliver just the result when it has already answered the user,
+  rather than repeating its earlier reply first.
 
 - **Claude Sonnet 5.5 no longer fails every request.** The Anthropic service
   sent it thinking `disabled`, which it rejects with a 400; it now gets
