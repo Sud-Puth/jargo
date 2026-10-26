@@ -179,3 +179,53 @@ func TestGroupWaitHonorsTheContext(t *testing.T) {
 		t.Error("the group reported itself done because the caller gave up")
 	}
 }
+
+// A group keeping its events loses none however far behind the caller falls,
+// keeps their order, starts with what was buffered before it was asked to, and
+// hands over what it kept even after it finished.
+func TestAGroupKeepingItsEventsLosesNone(t *testing.T) {
+	g := newGroup()
+	update := func(n int) jobcontext.GroupEvent {
+		return jobcontext.GroupEvent{Type: jobcontext.EventUpdate, Data: map[string]any{"n": n}}
+	}
+	g.Report(update(0))
+	g.KeepEvents()
+	for n := 1; n < 1000; n++ {
+		g.Report(update(n))
+	}
+	g.Complete()
+
+	for want := range 1000 {
+		e, ok := g.NextEvent(t.Context())
+		if !ok {
+			t.Fatalf("ran out after %d events, want 1000", want)
+		}
+		if got := e.Data["n"]; got != want {
+			t.Fatalf("event %d carries %v", want, got)
+		}
+	}
+	if _, ok := g.NextEvent(t.Context()); ok {
+		t.Error("an event came after the last one kept")
+	}
+}
+
+// NextEvent waits for an event, and gives up when the caller's context ends.
+func TestNextEventWaitsAndHonorsTheContext(t *testing.T) {
+	g := newGroup()
+	g.KeepEvents()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		g.Report(jobcontext.GroupEvent{Type: jobcontext.EventUpdate})
+	}()
+	if _, ok := g.NextEvent(t.Context()); !ok {
+		t.Fatal("no event arrived")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if _, ok := g.NextEvent(ctx); ok {
+		t.Error("an event arrived from nowhere")
+	}
+	g.Complete()
+}

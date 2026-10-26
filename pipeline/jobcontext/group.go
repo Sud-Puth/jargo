@@ -77,6 +77,12 @@ type Group struct {
 	closed    bool
 	err       error
 	events    chan GroupEvent
+	// keep reports whether the group keeps every event until NextEvent takes it,
+	// rather than dropping what overflows the channel. kept holds them, and
+	// arrived is signaled whenever one is added or the group finishes.
+	keep    bool
+	kept    []GroupEvent
+	arrived chan struct{}
 	// stopTimeout calls off the group's timeout, and is nil when it is running
 	// without one.
 	stopTimeout func()
@@ -102,6 +108,7 @@ func NewGroup(jobID string, workerNames []string, cancelOnError bool) *Group {
 		responses:     make(map[string]map[string]any),
 		done:          make(chan struct{}),
 		events:        make(chan GroupEvent, eventBuffer),
+		arrived:       make(chan struct{}, 1),
 	}
 }
 
@@ -202,8 +209,82 @@ func (g *Group) Report(e GroupEvent) {
 	if g.closed {
 		return
 	}
+	if g.keep {
+		g.kept = append(g.kept, e)
+		g.signalArrived()
+		return
+	}
 	select {
 	case g.events <- e:
+	default:
+	}
+}
+
+// KeepEvents has the group keep every event the workers report until NextEvent
+// takes it, however far behind the caller falls, rather than drop what overflows
+// the buffer. It is for a caller that cannot afford to miss one, such as a stream
+// a worker keeps open for as long as the caller lives. Events then come only
+// through NextEvent, starting with any already buffered.
+func (g *Group) KeepEvents() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.keep {
+		return
+	}
+	g.keep = true
+	for {
+		select {
+		case e, ok := <-g.events:
+			if !ok {
+				return
+			}
+			g.kept = append(g.kept, e)
+		default:
+			return
+		}
+	}
+}
+
+// NextEvent returns the next event a worker reported, waiting for one. It
+// reports false once the group has finished and every event it kept has been
+// taken, or when ctx ends first.
+func (g *Group) NextEvent(ctx context.Context) (GroupEvent, bool) {
+	for {
+		g.mu.Lock()
+		keep := g.keep
+		if keep && len(g.kept) > 0 {
+			e := g.kept[0]
+			g.kept[0] = GroupEvent{}
+			g.kept = g.kept[1:]
+			g.mu.Unlock()
+			return e, true
+		}
+		finished := g.closed
+		g.mu.Unlock()
+
+		if !keep {
+			select {
+			case e, ok := <-g.events:
+				return e, ok
+			case <-ctx.Done():
+				return GroupEvent{}, false
+			}
+		}
+		if finished {
+			return GroupEvent{}, false
+		}
+		select {
+		case <-g.arrived:
+		case <-ctx.Done():
+			return GroupEvent{}, false
+		}
+	}
+}
+
+// signalArrived wakes a caller waiting in NextEvent. The caller holds g.mu.
+func (g *Group) signalArrived() {
+	select {
+	case g.arrived <- struct{}{}:
 	default:
 	}
 }
@@ -232,4 +313,5 @@ func (g *Group) finish(err error) {
 	g.err = err
 	close(g.events)
 	close(g.done)
+	g.signalArrived()
 }
