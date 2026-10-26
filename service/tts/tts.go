@@ -796,6 +796,14 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	// The turn's context is done, so the whitespace opening the next one is its
 	// own to drop again.
 	b.setSentNonWhitespace(false)
+	// A filter's state belongs to one reply, so it is cleared as an
+	// interruption clears it: a code block one reply left open must not mute
+	// the next.
+	for _, f := range b.filters {
+		if i, ok := f.(ttstext.InterruptibleFilter); ok {
+			i.HandleInterruption()
+		}
+	}
 	b.onTurnContextCompleted(ctx)
 	if isEnd {
 		return b.PushFrame(ctx, f, dir)
