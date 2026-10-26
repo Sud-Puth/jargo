@@ -70,12 +70,13 @@ const (
 	asyncToolFinalDescription = "This is the final result for the asynchronous task associated with this " +
 		"tool_call_id. The task has completed. No further results will arrive for " +
 		"this tool_call_id. You must convey this result to the user, even if the " +
-		"conversation has moved on. Never leave it unsaid. First finish responding " +
-		"to whatever the user is talking about now, then deliver the result at the " +
-		"end of your response. How you deliver it depends on its size: if the " +
-		"result is short, simply state it; if it is long or complex, name what has " +
-		"come back and offer the details. Convey it once; do not repeat it in " +
-		"later responses."
+		"conversation has moved on. Never leave it unsaid. If the user has said " +
+		"something you have not answered yet, first finish responding to that, " +
+		"then deliver the result at the end of your response; if you have already " +
+		"answered, deliver just the result and do not repeat your earlier reply. " +
+		"How you deliver it depends on its size: if the result is short, simply " +
+		"state it; if it is long or complex, name what has come back and offer " +
+		"the details. Convey it once; do not repeat it in later responses."
 
 	// The spelling below is the protocol's, not prose: it is text the model
 	// reads, and it has to read the same wherever the protocol is spoken.
@@ -101,10 +102,11 @@ Some of your tools keep running after you have replied. Their results arrive lat
 	`messages in the conversation, on whatever turn happens to be in progress by then.
 
 A result that has arrived is owed to the user, whatever the conversation has moved on to. ` +
-	`Answer what the user just said first, then add the result at the end of that same reply: ` +
-	`never before your answer, and never as a reply of its own. State a short result outright; ` +
-	`for a long one, say what came back and offer the details. Say it once, and do not repeat ` +
-	`it in later replies.`
+	`If the user has said something you have not answered yet, answer that first, then add the ` +
+	`result at the end of that same reply: never before your answer. If you have already ` +
+	`answered everything the user said, deliver just the result: do not repeat or rephrase ` +
+	`your earlier reply. State a short result outright; for a long one, say what came back and ` +
+	`offer the details. Say it once, and do not repeat it in later replies.`
 
 // asyncToolCanceledResult is the result a canceled call settles with. It names
 // the tool call as the thing that ended: a bare marker says nothing about
