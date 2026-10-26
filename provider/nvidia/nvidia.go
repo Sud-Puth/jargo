@@ -8,5 +8,5 @@ package nvidia
 
 const (
 	baseURL      = "https://integrate.api.nvidia.com/v1"
-	defaultModel = "nvidia/nemotron-3-super-120b-a12b"
+	defaultModel = "nvidia/nemotron-3.5-super-vl-120b-a12b"
 )
