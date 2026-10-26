@@ -28,7 +28,7 @@ var errNotGenerator = errors.New("geminilive: the model generates continuously")
 const (
 	defaultBaseURL = "wss://generativelanguage.googleapis.com/ws/" +
 		"google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-	defaultModel = "gemini-live-2.5-flash-native-audio"
+	defaultModel = "gemini-3.8-live"
 	defaultVoice = "Puck"
 	// outputSampleRate is the fixed rate of the Live API's output audio.
 	outputSampleRate = 24000

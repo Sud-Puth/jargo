@@ -156,6 +156,19 @@ func TestNewServices(t *testing.T) {
 	}
 }
 
+// TestLLMDefaultsToGemini38FlashOnTheGlobalEndpoint checks the defaults pair:
+// Vertex serves the Gemini 3 series only from the global endpoint, and
+// gemini-3.6-flash is retired there on 2026-11-19.
+func TestLLMDefaultsToGemini38FlashOnTheGlobalEndpoint(t *testing.T) {
+	svc := NewLLM(LLMConfig{ProjectID: "p", Credentials: Credentials{TokenSource: staticSource{"t"}}})
+	if got := svc.Model(); got != "gemini-3.8-flash" {
+		t.Errorf("model = %q, want gemini-3.8-flash", got)
+	}
+	if got := location(""); got != "global" {
+		t.Errorf("location = %q, want global", got)
+	}
+}
+
 // TestModelPath checks the resource name Vertex identifies a model by.
 func TestModelPath(t *testing.T) {
 	got := modelPath("my-project", "us-east4", "gemini-2.5-flash")

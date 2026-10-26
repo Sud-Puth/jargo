@@ -38,9 +38,9 @@ const (
 	// defaultLocation is the region used when none is configured.
 	defaultLocation = "global"
 	// defaultLLMModel is the cascaded model used when none is configured.
-	defaultLLMModel = "gemini-3.6-flash"
+	defaultLLMModel = "gemini-3.8-flash"
 	// defaultLiveModel is the Live model used when none is configured.
-	defaultLiveModel = "gemini-live-2.5-flash-native-audio"
+	defaultLiveModel = "gemini-3.8-live"
 )
 
 // errNoCredentials is returned when neither a token source nor service-account
