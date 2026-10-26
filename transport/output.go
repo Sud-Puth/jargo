@@ -10,6 +10,7 @@ import (
 	"github.com/gojargo/jargo/audio"
 	"github.com/gojargo/jargo/audio/dtmf"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor"
 )
 
@@ -86,6 +87,16 @@ func NewBaseOutput(name string, params Params, self OutputDriver) *BaseOutput {
 // the marker is how it recognizes the output end without depending on which
 // transport it is.
 func (bo *BaseOutput) PlaysOutput() {}
+
+// Capabilities is the media this transport sends to the user: audio when
+// AudioOutEnabled is set. A transport here sends no video, so video_out is
+// reported false.
+func (bo *BaseOutput) Capabilities() capabilities.BotCapabilities {
+	return capabilities.BotCapabilities{
+		AudioOut: new(bo.params.AudioOutEnabled),
+		VideoOut: new(false),
+	}
+}
 
 // SampleRate is the output sample rate in Hz, set when the transport starts.
 func (bo *BaseOutput) SampleRate() int { return bo.sampleRate }

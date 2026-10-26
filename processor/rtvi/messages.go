@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 )
 
 const (
@@ -169,20 +170,29 @@ func ParseClientReadyData(raw json.RawMessage) (ClientReadyData, error) {
 }
 
 // BotReadyData is the payload of a bot-ready message: the protocol version the
-// session settled on, and what the bot is.
+// session settled on, what the bot is, and what it does.
 type BotReadyData struct {
 	Version string           `json:"version"`
 	About   *AboutClientData `json:"about,omitempty"`
+	// Capabilities is what the bot does in this session (media sent and
+	// received, metrics), so the client can show only the UI that applies. A
+	// field the bot cannot determine is left out. Added in protocol 2.2.0.
+	Capabilities *capabilities.BotCapabilities `json:"capabilities,omitempty"`
 }
 
 // BotReady builds a bot-ready message in reply to the client-ready with id,
 // declaring version and describing the bot with about. A nil about describes
 // this library.
 func BotReady(id, version string, about *AboutClientData) Message {
+	return botReady(id, version, about, nil)
+}
+
+// botReady is BotReady also saying what the bot does, when caps is set.
+func botReady(id, version string, about *AboutClientData, caps *capabilities.BotCapabilities) Message {
 	if about == nil {
 		about = &AboutClientData{Library: LibraryName, LibraryVersion: LibraryVersion()}
 	}
-	return newMessage(TypeBotReady, id, BotReadyData{Version: version, About: about})
+	return newMessage(TypeBotReady, id, BotReadyData{Version: version, About: about, Capabilities: caps})
 }
 
 // RawClientMessageData is the payload of a client-message: the client's own

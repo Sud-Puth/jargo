@@ -1,11 +1,15 @@
 package rtvi_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor/rtvi"
 )
 
@@ -182,5 +186,41 @@ func TestClientReadyDataRoundTrips(t *testing.T) {
 	}
 	if got.Version != "2.1.0" || got.About.Library != "rtvi-web" || got.About.LibraryVersion != "1.2.3" {
 		t.Errorf("client-ready = %+v, want the version and library the client declared", got)
+	}
+}
+
+// TestBotReadyCarriesTheWorkersCapabilities checks the bot-ready says what the
+// bot does, as its worker reports it, and leaves out what is unknown.
+func TestBotReadyCarriesTheWorkersCapabilities(t *testing.T) {
+	caps := capabilities.BotCapabilities{AudioIn: new(true), AudioOut: new(true), VideoIn: new(false)}
+	c := newClientWith(t, pipeline.WorkerConfig{Capabilities: caps})
+
+	m, _ := clientReady(t, c, rtvi.ProtocolVersion)
+	d, ok := m.Data.(rtvi.BotReadyData)
+	if !ok || d.Capabilities == nil {
+		t.Fatalf("bot-ready data = %+v, want capabilities", m.Data)
+	}
+	// With no transport in the pipeline, only the metrics are derived.
+	want := caps
+	want.Metrics = new(false)
+	if !reflect.DeepEqual(*d.Capabilities, want) {
+		t.Errorf("capabilities = %+v, want %+v", *d.Capabilities, want)
+	}
+
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Data struct {
+			Capabilities map[string]bool `json:"capabilities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	wantWire := map[string]bool{"audio_in": true, "audio_out": true, "video_in": false, "metrics": false}
+	if !reflect.DeepEqual(wire.Data.Capabilities, wantWire) {
+		t.Errorf("wire capabilities = %v, want %v with the unknown left out", wire.Data.Capabilities, wantWire)
 	}
 }

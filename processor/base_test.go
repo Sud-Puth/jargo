@@ -9,6 +9,7 @@ import (
 
 	"github.com/gojargo/jargo/clock"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor"
 )
 
@@ -37,6 +38,8 @@ func (f *flusher) TrackFlushProbe(*frames.PipelineFlushFrame) {}
 // TurnTracker reports no tracker: this stand-in is a pipeline only as far as
 // flushing goes.
 func (f *flusher) TurnTracker() processor.TurnTracker { return nil }
+
+func (f *flusher) Capabilities() capabilities.BotCapabilities { return capabilities.BotCapabilities{} }
 
 func (f *flusher) count() int {
 	f.mu.Lock()

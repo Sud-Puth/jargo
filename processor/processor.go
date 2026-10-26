@@ -18,6 +18,7 @@ import (
 	"github.com/gojargo/jargo/clock"
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/internal/goid"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/telemetry/metrics"
 	"github.com/gojargo/jargo/telemetry/tracing"
 	errs "github.com/gojargo/jargo/utils/errors"
@@ -72,6 +73,10 @@ type Running interface {
 	// subscribes to it; the interface is narrow because the observer that
 	// implements it already depends on this package.
 	TurnTracker() TurnTracker
+	// Capabilities is what the bot does in the session, derived from the
+	// pipeline's transports and parameters, for a client to configure itself
+	// by.
+	Capabilities() capabilities.BotCapabilities
 }
 
 // TurnTracker reports where the conversation's turns end.

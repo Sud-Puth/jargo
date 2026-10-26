@@ -57,13 +57,18 @@ type client struct {
 
 func newClient(t *testing.T) *client {
 	t.Helper()
+	return newClientWith(t, pipeline.WorkerConfig{})
+}
+
+// newClientWith is newClient for a worker configured with cfg.
+func newClientWith(t *testing.T, cfg pipeline.WorkerConfig) *client {
+	t.Helper()
 	proc := rtvi.NewProcessor()
 	sk := newSink()
 	out := make(chan rtvi.Message, 16)
-	task := pipeline.NewWorker(pipeline.New(proc, sk), pipeline.WorkerConfig{
-		Observers:               []pipeline.Observer{rtvi.NewObserver(proc)},
-		ReachedDownstreamFilter: pipeline.AnyFrame,
-	})
+	cfg.Observers = []pipeline.Observer{rtvi.NewObserver(proc)}
+	cfg.ReachedDownstreamFilter = pipeline.AnyFrame
+	task := pipeline.NewWorker(pipeline.New(proc, sk), cfg)
 	events.On(&task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
 		if m, ok := f.(*frames.OutputTransportMessageUrgentFrame); ok {
 			if msg, ok := m.Message.(rtvi.Message); ok {

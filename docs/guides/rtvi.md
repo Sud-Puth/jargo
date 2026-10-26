@@ -62,6 +62,13 @@ understands. Any other version gets an `error-response` saying so, and the
 session goes ahead anyway: the client is better placed than the bot to decide
 whether to carry on. `Processor.ClientVersion` reports what the client declared.
 
+The `bot-ready` also carries `capabilities`: what the bot does in the session
+(`audio_in`, `audio_out`, `video_in`, `screen_in`, `video_out` and `metrics`), so a
+client can show only the UI that applies. The worker derives it from its
+transports and from `Params.EnableMetrics`; set `WorkerConfig.Capabilities` for
+what the pipeline cannot show. A field nobody knows is left out, and the client
+keeps its default for it.
+
 | Type | Meaning |
 |---|---|
 | `client-ready` → `bot-ready` | The handshake. |

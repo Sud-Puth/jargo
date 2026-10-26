@@ -7,6 +7,7 @@ import (
 
 	"github.com/gojargo/jargo/audio"
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor"
 )
 
@@ -86,6 +87,17 @@ func (bi *BaseInput) PushAudioFrame(ctx context.Context, f frames.InputAudioFram
 		return
 	}
 	sendAudio(ctx, ch, f)
+}
+
+// Capabilities is the media this transport receives from the user: audio when
+// AudioInEnabled is set. A transport here receives no video, so video_in and
+// screen_in are reported false.
+func (bi *BaseInput) Capabilities() capabilities.BotCapabilities {
+	return capabilities.BotCapabilities{
+		AudioIn:  new(bi.params.AudioInEnabled),
+		VideoIn:  new(false),
+		ScreenIn: new(false),
+	}
 }
 
 // PushTransportMessage emits a message received from the client as an

@@ -14,6 +14,7 @@ import (
 	"github.com/gojargo/jargo/clock"
 	"github.com/gojargo/jargo/frames"
 	"github.com/gojargo/jargo/observers"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/processor/rtvi"
 	"github.com/gojargo/jargo/telemetry/tracing"
@@ -216,6 +217,10 @@ type WorkerConfig struct {
 	RTVIProcessor *rtvi.Processor
 	// RTVIObserverParams configures the observer added alongside it.
 	RTVIObserverParams *rtvi.ObserverParams
+	// Capabilities is what the bot does, for fields the pipeline cannot show.
+	// Its known fields replace the ones derived from the pipeline's transports
+	// and parameters. See Worker.Capabilities.
+	Capabilities capabilities.BotCapabilities
 }
 
 // ProcessorUnusablePolicy is what a pipeline worker does when a processor can no
@@ -1640,6 +1645,37 @@ func (t *Worker) maybeAddRTVI(pipe processor.Processor, cfg *WorkerConfig) proce
 	cfg.Observers = append(append([]Observer(nil), cfg.Observers...), observer)
 
 	return New(t.rtvi, pipe)
+}
+
+// Capabilities is what the bot does in this session.
+//
+// It is derived from the media the pipeline's transports send and receive and
+// from Params.EnableMetrics, with WorkerConfig.Capabilities applied on top. A
+// field no transport reports is nil (unknown). RTVI sends this to the client in
+// bot-ready.
+func (t *Worker) Capabilities() capabilities.BotCapabilities {
+	derived := capabilities.BotCapabilities{Metrics: new(t.params.EnableMetrics)}
+	walkProcessors(t.pipeline, func(p processor.Processor) {
+		if r, ok := p.(capabilityReporter); ok {
+			derived = derived.Combine(r.Capabilities())
+		}
+	})
+	return derived.Override(t.cfg.Capabilities)
+}
+
+// capabilityReporter is a processor that knows part of what the bot does: a
+// transport, which knows the media it sends or receives.
+type capabilityReporter interface {
+	Capabilities() capabilities.BotCapabilities
+}
+
+// walkProcessors calls fn for p and every processor inside it, nested ones
+// included.
+func walkProcessors(p processor.Processor, fn func(processor.Processor)) {
+	fn(p)
+	for _, child := range p.Processors() {
+		walkProcessors(child, fn)
+	}
 }
 
 // RTVI is the processor a client talks to, whether this worker added it or the

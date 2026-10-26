@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gojargo/jargo/frames"
+	"github.com/gojargo/jargo/pipeline/capabilities"
 	"github.com/gojargo/jargo/processor"
 	"github.com/gojargo/jargo/utils/text"
 )
@@ -888,7 +889,18 @@ func (p *Processor) handleClientReady(ctx context.Context, in Incoming) error {
 			return err
 		}
 	}
-	return p.send(ctx, BotReady(in.ID, p.botReadyVersion(version), nil))
+	return p.send(ctx, botReady(in.ID, p.botReadyVersion(version), nil, p.capabilities()))
+}
+
+// capabilities is what the bot does, as the pipeline it runs in reports it, or
+// nil outside one.
+func (p *Processor) capabilities() *capabilities.BotCapabilities {
+	running := p.Running()
+	if running == nil {
+		return nil
+	}
+	caps := running.Capabilities()
+	return &caps
 }
 
 // negotiate reads the version a client declared, returning it parsed and the
