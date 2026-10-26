@@ -15,6 +15,49 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`LLMWithBackend`, in alpha: a conversational frontend LLM with a backend
+  that does the work it hands off.** `llmwithbackend.New` drops into a pipeline
+  where an LLM goes. The frontend keeps the conversation moving while a
+  `llmworker.BackendWorker`, running a heavier model with the tools, does the
+  work: the frontend's built-in `delegate` tool hands a request over and returns
+  at once with whether the backend was idle or working, and each output the
+  backend produces comes back as a `Backend:` message in the frontend's
+  conversation, run or not as the backend asks. A `BackendConnector` holds the
+  glue and its seams (rendering, the pairing instruction, client tracing), and a
+  request strategy words the request: the transcript since the previous
+  delegation for a text frontend, the model's own wording for a
+  speech-to-speech one. The frontend has to carry built-in tools, which the OpenAI
+  chat completions, Anthropic and Gemini services do. See
+  [Services](docs/guides/services.md#a-frontend-with-a-backend).
+- **`llmworker.BackendWorker` and `llmworker.BackendSession`.** A backend worker
+  runs an LLM, with its own conversation and multi-step tool calling, for a
+  frontend that attaches with the `attach` job and from then on hears everything
+  the backend produces: its turns, split by the `>>` mark into what the user
+  should hear and notes, reasoning summaries, each phase of its function calls,
+  errors, and when it has nothing left to do. Requests go the other way as
+  `message` jobs. Detaching interrupts the backend and cancels every call in
+  flight. `BackendSession` is the frontend's side.
+- **Function calls made outside the pipeline are reported to the client.**
+  `frames.ExternalFunctionCallsStartedFrame`, `ExternalFunctionCallInProgressFrame`,
+  `ExternalFunctionCallResultFrame` and `ExternalFunctionCallCancelFrame` mirror
+  the pipeline's own function-call frames for calls that ran elsewhere, such as
+  in a backend worker. Nothing in the pipeline acts on them; the RTVI observer
+  reports them as the usual `llm-function-call-*` messages, at their own
+  function's report level.
+- `llm.Base.CancelFunctionCalls` cancels every function call in flight,
+  asynchronous ones included, and `LLMWithBackendRoleObjection` lets a service
+  say it cannot be the frontend or the backend of a pairing.
+- `AssistantAggregator.HasSynchronousFunctionCallsInProgress` reports whether a
+  call the model waits on is still running.
+- The `use_provider_thinking_default` LLM setting has a model with no thinking
+  configured run at its provider's default, where the Anthropic, Gemini, OpenAI
+  Responses and Perplexity services otherwise send their lowest setting. A
+  backend worker sets it on its LLM.
+- `jobcontext.Group.KeepEvents` and `NextEvent` keep every event a job's workers
+  report until the caller takes it, for a stream that cannot afford to drop one.
+- `workers.Base.Bind` makes a worker built on another worker the one its hooks
+  are called on.
+
 - **Backchannels, for the user and for the bot.** A backchannel is a short
   acknowledgment said while the other side talks, which neither interrupts it
   nor joins the conversation. `frames.UserBackchannelFrame` is what the user
@@ -217,6 +260,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- ⚠️ **Breaking change:** `responses.ThinkingReporter` gains
+  `UseProviderThinkingDefault`, which the LLM base implements.
 - **What kind of text a frame holds is its `TextType`.** `frames.AggregationType`
   is now `frames.TextType`, with `TextTypeSentence`, `TextTypeToken`,
   `TextTypeWord` and `AnyTextType`, since a `TTSSpeakFrame` or a backchannel
@@ -513,6 +558,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Fixed an LLM service never sending the tools it implements itself, such as a
+  `cancel_<tool>` tool, when the conversation advertised none of its own.
+- Fixed a tool that answered at once reporting its result ahead of the end of the
+  response that asked for it, which left the turn's own text out of the
+  conversation the next inference ran on. A response's calls now start once the
+  response has ended.
+- Fixed an LLM worker activated over the bus never advertising its tools or
+  appending the activation's messages: the worker base called its hooks on the
+  pipeline worker underneath instead.
 - **A reply that skips TTS reaches the client as `bot-output`.** One sent with
   `audio_response` false never did: the TTS service passed its LLM text through
   raw. It now cuts that text into sentences and pushes each as an

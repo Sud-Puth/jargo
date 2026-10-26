@@ -251,6 +251,36 @@ Lower latency and better prosody, at the cost of the per-stage control you get
 from three separate services. You cannot inspect the transcript before the model
 answers, or swap just the voice.
 
+## A frontend with a backend
+
+`llmwithbackend.New` pairs a fast conversational LLM, the **frontend**, with a
+slower, stronger one that has the tools, the **backend**. It is alpha: its API is
+likely to change between releases. Put it where the LLM goes:
+
+```go
+convo := frames.NewLLMContext("You fix failing tests in the repository.")
+convo.SetTools([]frames.Tool{readFile, runTests})
+backend, err := llmworker.NewBackend(llmworker.BackendConfig{LLM: anthropicLLM, Context: convo})
+llm, err := llmwithbackend.New(llmwithbackend.Config{Frontend: openaiLLM, Backend: backend})
+
+pipeline.New(t.Input(), stt, agg.User(), llm, tts, t.Output(), agg.Assistant())
+```
+
+The frontend gets one built-in tool, `delegate`, which hands the request to the
+backend and returns at once, so the frontend acknowledges while the backend
+works. Everything the backend writes comes back as a message in the frontend's
+conversation marked `Backend:`. Its model begins a message with `>>` when the
+user should hear it, and the frontend then runs on it; everything else it writes
+is kept as notes on the work. The user can keep talking meanwhile: a second
+request joins the work in progress, and a correction changes or stops it.
+
+The frontend's system instruction says who the assistant is, the backend's says
+what work it does, and each gets a pairing instruction appended that explains how
+the two work together. `llmwithbackend.ConnectorConfig` changes the wording, how
+requests are composed, and whether each exchange is traced to the client as an
+RTVI server message. The frontend has to carry built-in tools: the OpenAI chat
+completions, Anthropic and Gemini services do.
+
 ## Switching at runtime
 
 `pipeline.NewServiceSwitcher` routes to one of several services, changed mid-call
