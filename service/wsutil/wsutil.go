@@ -29,13 +29,57 @@ const DefaultReadLimit = 16 << 20
 // be felt once several WebSocket services tear down one after another.
 const DefaultCloseTimeout = 2 * time.Second
 
-// Conn is a WebSocket connection whose closing handshake is bounded, so a peer
-// that never answers cannot hold up a teardown. Everything else is the
-// underlying connection's.
+// DefaultSendTimeout is the default ceiling on a single send. A send only waits
+// once the peer has stopped taking data and the write buffers are full, so on a
+// working connection it returns at once.
+const DefaultSendTimeout = 5 * time.Second
+
+// Conn is a WebSocket connection whose closing handshake and sends are bounded,
+// so a peer that never answers, or stops reading, cannot hold up a teardown or
+// the service writing to it. Everything else is the underlying connection's.
 type Conn struct {
 	*websocket.Conn
 	// closeTimeout is how long Close waits for the peer's answer.
 	closeTimeout time.Duration
+	// sendTimeout is how long one Write may wait on a peer that has stopped
+	// reading; zero waits indefinitely.
+	sendTimeout time.Duration
+}
+
+// Write sends a message, dropping the connection if the send stalls.
+//
+// The library puts no bound of its own on a send: once the peer stops reading
+// and the write buffer fills, the send waits until the connection drops, and TCP
+// can take many minutes to notice, holding up the service writing and every
+// processor after it. The send is bounded by the send timeout instead. A send
+// that outlasts it closes the connection, as the library does whenever a
+// write's context ends, so the send fails the way any dropped connection does
+// and the service's reconnect handling takes over.
+func (c *Conn) Write(ctx context.Context, typ websocket.MessageType, p []byte) error {
+	if c.sendTimeout <= 0 {
+		return c.Conn.Write(ctx, typ, p)
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+	defer cancel()
+	err := c.Conn.Write(sendCtx, typ, p)
+	if err != nil && ctx.Err() == nil && errors.Is(sendCtx.Err(), context.DeadlineExceeded) {
+		slog.Warn("websocket send did not complete in time; the peer has stopped reading, "+
+			"dropping the connection", "timeout", c.sendTimeout)
+		return fmt.Errorf("%w within %s: %w", ErrSendTimeout, c.sendTimeout, err)
+	}
+	return err
+}
+
+// ErrSendTimeout is wrapped by the error of a send that outlasted the send
+// timeout, which dropped the connection.
+//
+//nolint:gochecknoglobals // sentinel error
+var ErrSendTimeout = errors.New("wsutil: websocket send did not complete")
+
+// SetSendTimeout sets how long one Write may wait on a peer that has stopped
+// reading before the connection is dropped. Zero or less waits indefinitely.
+func (c *Conn) SetSendTimeout(d time.Duration) {
+	c.sendTimeout = max(d, 0)
 }
 
 // Close closes the connection, giving up on the closing handshake once the
@@ -140,7 +184,7 @@ func Dial(ctx context.Context, url string, header http.Header, readLimit int64) 
 	if readLimit > 0 {
 		conn.SetReadLimit(readLimit)
 	}
-	return &Conn{Conn: conn, closeTimeout: DefaultCloseTimeout}, nil
+	return &Conn{Conn: conn, closeTimeout: DefaultCloseTimeout, sendTimeout: DefaultSendTimeout}, nil
 }
 
 // redactDialError rewrites a dial error so it no longer carries the query of
