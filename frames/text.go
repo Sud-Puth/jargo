@@ -125,6 +125,27 @@ func NewTTSSpeakFrame(text string) *TTSSpeakFrame {
 	}
 }
 
+// BotBackchannelFrame is a short acknowledgment for the bot to say while the
+// user talks, such as "Mm-hmm.".
+//
+// The TTS service speaks it like any TTSSpeakFrame, and its text frames have
+// the text type TextTypeBackchannel. It stays out of the LLM context unless
+// AppendToContext is set, and interruptions do not cut it off unless the frame
+// is made interruptible with SetInterruptible(true).
+type BotBackchannelFrame struct {
+	TTSSpeakFrame
+	UninterruptibleMixin
+}
+
+// NewBotBackchannelFrame builds a BotBackchannelFrame that says text.
+func NewBotBackchannelFrame(text string) *BotBackchannelFrame {
+	return &BotBackchannelFrame{
+		BaseDataFrame: NewBaseDataFrame("BotBackchannelFrame"),
+		Text:          text,
+		TextType:      TextTypeBackchannel,
+	}
+}
+
 // String implements fmt.Stringer.
 func (f *TTSSpeakFrame) String() string {
 	return fmt.Sprintf("%s(text: [%s])", f.Name(), f.Text)
@@ -204,6 +225,35 @@ func (f *EagerTranscriptionFrame) String() string {
 		f.Name(), f.UserID, f.Text, f.Language, f.Timestamp)
 }
 
+// UserBackchannelFrame is a short acknowledgment the user said while the bot
+// talks, such as "mhm". It is pushed in place of a transcription, so the bot
+// keeps talking and the acknowledgment stays out of the LLM context. It is a
+// data frame.
+type UserBackchannelFrame struct {
+	BaseDataFrame
+	// Text is what the user said.
+	Text string
+	// UserID identifies the user who spoke.
+	UserID string
+	// Timestamp is when the user said it.
+	Timestamp string
+}
+
+// NewUserBackchannelFrame builds a UserBackchannelFrame.
+func NewUserBackchannelFrame(text, userID, timestamp string) *UserBackchannelFrame {
+	return &UserBackchannelFrame{
+		BaseDataFrame: NewBaseDataFrame("UserBackchannelFrame"),
+		Text:          text,
+		UserID:        userID,
+		Timestamp:     timestamp,
+	}
+}
+
+// String implements fmt.Stringer.
+func (f *UserBackchannelFrame) String() string {
+	return fmt.Sprintf("%s(user: %s, text: [%s], timestamp: %s)", f.Name(), f.UserID, f.Text, f.Timestamp)
+}
+
 // InterimTranscriptionFrame carries a partial (non-final) speech transcription
 // for a user.
 type InterimTranscriptionFrame struct {
@@ -242,6 +292,8 @@ var (
 	_ DataFrame = (*LLMTextFrame)(nil)
 	_ DataFrame = (*TTSTextFrame)(nil)
 	_ DataFrame = (*TTSSpeakFrame)(nil)
+	_ DataFrame = (*BotBackchannelFrame)(nil)
+	_ DataFrame = (*UserBackchannelFrame)(nil)
 	_ DataFrame = (*TranscriptionFrame)(nil)
 	_ DataFrame = (*InterimTranscriptionFrame)(nil)
 	_ DataFrame = (*EagerTranscriptionFrame)(nil)
@@ -260,6 +312,9 @@ const (
 	TextTypeToken TextType = "token"
 	// TextTypeWord is text a word at a time.
 	TextTypeWord TextType = "word"
+	// TextTypeBackchannel is a short acknowledgment the bot says while the user
+	// talks, such as "Mm-hmm.".
+	TextTypeBackchannel TextType = "backchannel"
 	// AnyTextType is not a kind of text but a wildcard standing for every one
 	// of them, for something registered against a type that should apply
 	// whatever the text is.

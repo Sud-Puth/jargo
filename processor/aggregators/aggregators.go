@@ -83,7 +83,22 @@ const (
 	// EventUserMuteStopped fires when the user is unmuted. It carries no
 	// argument.
 	EventUserMuteStopped = "on_user_mute_stopped"
+	// EventUserBackchannel fires when the user acknowledges the bot without
+	// interrupting it, from a UserBackchannelFrame, carrying a UserBackchannel.
+	// The acknowledgment stays out of the conversation and its turn events.
+	EventUserBackchannel = "on_user_backchannel"
 )
+
+// UserBackchannel describes a short acknowledgment the user said while the bot
+// talks, such as "mhm", which stays out of the conversation.
+type UserBackchannel struct {
+	// Content is what the user said.
+	Content string
+	// Timestamp is when the user said it.
+	Timestamp string
+	// UserID identifies the user, and is empty when it is not known.
+	UserID string
+}
 
 // UserTurnStopped describes a user turn that has just ended.
 type UserTurnStopped struct {
@@ -133,7 +148,21 @@ const (
 	// EventAssistantThought fires when a reasoning model finishes a thought,
 	// carrying an AssistantThought with what it reasoned.
 	EventAssistantThought = "on_assistant_thought"
+	// EventAssistantBackchannel fires when the assistant starts saying text of
+	// type backchannel, such as a BotBackchannelFrame's, carrying an
+	// AssistantBackchannel. It stays out of the conversation and its turn
+	// events.
+	EventAssistantBackchannel = "on_assistant_backchannel"
 )
+
+// AssistantBackchannel describes a short acknowledgment the assistant said
+// while the user talks, such as "Mm-hmm.".
+type AssistantBackchannel struct {
+	// Content is what the assistant said.
+	Content string
+	// Timestamp is when the assistant started saying it, as ISO 8601.
+	Timestamp string
+}
 
 // AssistantThought is one completed piece of a reasoning model's thinking.
 type AssistantThought struct {
@@ -440,7 +469,7 @@ func newUser(
 	for _, name := range []string{
 		EventUserTurnStarted, EventUserTurnStopped, EventUserTurnInferenceTriggered,
 		EventUserTurnStopTimeout, EventUserTurnIdle, EventUserTurnMessageAdded,
-		EventUserMuteStarted, EventUserMuteStopped,
+		EventUserMuteStarted, EventUserMuteStopped, EventUserBackchannel,
 	} {
 		u.Events().Register(name, false)
 	}
@@ -675,6 +704,11 @@ func (u *UserAggregator) handleFrame(ctx context.Context, f frames.Frame, dir pr
 
 	case *frames.TranscriptionFrame:
 		return u.handleTranscription(fr)
+
+	case *frames.UserBackchannelFrame:
+		u.Events().Call(ctx, EventUserBackchannel, u,
+			UserBackchannel{Content: fr.Text, Timestamp: fr.Timestamp, UserID: fr.UserID})
+		return u.PushFrame(ctx, f, dir)
 
 	case *frames.LLMRunFrame:
 		// Explicit trigger: run the LLM on the current context now (e.g. to make
@@ -1152,6 +1186,7 @@ func newAssistant(
 	a.Events().Register(EventAssistantTurnStarted, false)
 	a.Events().Register(EventAssistantTurnStopped, false)
 	a.Events().Register(EventAssistantThought, false)
+	a.Events().Register(EventAssistantBackchannel, false)
 	return a
 }
 
@@ -1242,6 +1277,7 @@ func (a *AssistantAggregator) route(ctx context.Context, f frames.Frame, dir pro
 			a.openTurn(ctx)
 		}
 	case *frames.TextFrame, *frames.LLMTextFrame, *frames.TTSTextFrame, *frames.AggregatedTextFrame:
+		a.reportBackchannel(ctx, f)
 		a.routeText(f)
 	case *frames.LLMThoughtStartFrame, *frames.LLMThoughtTextFrame, *frames.LLMThoughtEndFrame:
 		a.routeThought(ctx, f)
@@ -1357,6 +1393,17 @@ func (a *AssistantAggregator) releaseWork(ctx context.Context) {
 	}
 	a.taskWG.Wait()
 	a.summarizer.Cleanup(ctx)
+}
+
+// reportBackchannel reports a backchannel the assistant starts saying. It is
+// reported once, by the segment the TTS service will speak, which the output
+// transport releases as its audio starts.
+func (a *AssistantAggregator) reportBackchannel(ctx context.Context, f frames.Frame) {
+	if agg, ok := f.(*frames.AggregatedTextFrame); ok &&
+		agg.TextType == frames.TextTypeBackchannel && agg.WillBeSpoken {
+		a.Events().Call(ctx, EventAssistantBackchannel, a,
+			AssistantBackchannel{Content: agg.Text, Timestamp: frames.NowTimestamp()})
+	}
 }
 
 // routeText folds one piece of the turn's text into the aggregation, taking each
@@ -2210,7 +2257,7 @@ func isUserInput(f frames.Frame) bool {
 		*frames.UserStartedSpeakingFrame, *frames.UserStoppedSpeakingFrame,
 		frames.InputAudioFrame,
 		*frames.InterimTranscriptionFrame, *frames.TranscriptionFrame,
-		*frames.EagerTranscriptionFrame:
+		*frames.EagerTranscriptionFrame, *frames.UserBackchannelFrame:
 		return true
 	}
 	return false

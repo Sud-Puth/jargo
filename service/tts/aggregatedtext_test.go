@@ -142,3 +142,40 @@ func TestASpeakFrameIsASentenceByDefault(t *testing.T) {
 		t.Errorf("aggregated = %v, want a sentence", got)
 	}
 }
+
+// TestABotBackchannelIsSpokenAsAnUninterruptibleBackchannel checks a
+// BotBackchannelFrame is spoken as backchannel text, which interruptions do not
+// cut off and which stays out of the conversation, in token mode too.
+func TestABotBackchannelIsSpokenAsAnUninterruptibleBackchannel(t *testing.T) {
+	for _, mode := range []frames.TextType{frames.TextTypeSentence, frames.TextTypeToken} {
+		t.Run(string(mode), func(t *testing.T) {
+			got := collectAggregated(t, ttstext.NewSimpleAggregator(mode, ""), func(task *pipeline.Worker) {
+				task.QueueFrame(frames.NewBotBackchannelFrame("Mm-hmm."))
+			})
+
+			if len(got) == 0 {
+				t.Fatal("no aggregated text reached the pipeline")
+			}
+			for _, f := range got {
+				if f.TextType != frames.TextTypeBackchannel || frames.Interruptible(f) || f.AppendToContext {
+					t.Errorf("%v: type %q, interruptible %t, append to context %t; want an uninterruptible "+
+						"backchannel kept out of the context", f, f.TextType, frames.Interruptible(f), f.AppendToContext)
+				}
+			}
+		})
+	}
+}
+
+// TestABotBackchannelMadeInterruptibleIsSpokenSo checks a backchannel made
+// interruptible is spoken as interruptible text.
+func TestABotBackchannelMadeInterruptibleIsSpokenSo(t *testing.T) {
+	got := collectAggregated(t, nil, func(task *pipeline.Worker) {
+		f := frames.NewBotBackchannelFrame("Mm-hmm.")
+		f.SetInterruptible(true)
+		task.QueueFrame(f)
+	})
+
+	if len(got) == 0 || !frames.Interruptible(got[0]) {
+		t.Errorf("aggregated = %v, want interruptible text", got)
+	}
+}

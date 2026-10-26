@@ -101,6 +101,8 @@ func (a *PatternPairAggregator) AddPattern(
 	case frames.TextTypeSentence, frames.TextTypeWord, frames.TextTypeToken,
 		frames.AnyTextType:
 		return fmt.Errorf("%w: %q", ErrReservedTextType, typ)
+	case frames.TextTypeBackchannel:
+		// Not a way of grouping text by default, so a pattern may name it.
 	}
 	a.patterns = append(a.patterns, &pattern{
 		typ:    typ,

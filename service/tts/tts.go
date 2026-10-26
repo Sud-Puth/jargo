@@ -640,6 +640,12 @@ func (b *Base) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.D
 		return b.handleText(ctx, fr, f, dir)
 	case *frames.TTSSpeakFrame:
 		return b.handleSpeak(ctx, fr, dir)
+	case *frames.BotBackchannelFrame:
+		// Spoken like any TTSSpeakFrame. The frame's own interruptibility is
+		// carried over first: a backchannel is uninterruptible unless made
+		// otherwise, which the speak frame inside it does not know by its type.
+		fr.TTSSpeakFrame.SetInterruptible(frames.Interruptible(fr))
+		return b.handleSpeak(ctx, &fr.TTSSpeakFrame, dir)
 	case *frames.LLMFullResponseStartFrame:
 		b.setLLMResponding(true)
 		// A new turn gets one context id, shared by all of its sentences.
