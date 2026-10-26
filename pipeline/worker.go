@@ -1071,31 +1071,54 @@ func (t *Worker) cancelOnContextEnd(ctx context.Context) frames.Frame {
 	return cancelFrame
 }
 
-// setupWithinTimeout sets the pipeline up, bounded by SetupTimeout.
+// setupWithinTimeout sets the pipeline up, giving up once the setup timeout
+// passes or the worker is canceled (or ctx, the caller's context, ends) first. It
+// reports whether the pipeline was set up.
 //
-// A processor connects while it is set up, so one that never connects would
-// otherwise leave the run waiting on it with nothing to time it out. Reaching
-// the timeout gives up on the wait and leaves the blocked processor where it is,
-// to be released by the cleanup that follows: the context the processors were
-// handed is the one their own goroutines run on, so bounding it here would tear
-// down the very processors that did come up. It reports whether everything was
-// set up.
-func (t *Worker) setupWithinTimeout(ctx context.Context, setup processor.Setup) (bool, error) {
+// Giving up abandons the setup: the processors still being set up are told to
+// stop, never get the StartFrame, and never start. The pipeline is then only
+// cleaned up, and no CancelFrame is pushed into it. A cancel takes effect at
+// once, rather than once every processor has finished connecting, which for a
+// caller hanging up while a service was still connecting could be the whole of
+// the setup timeout.
+func (t *Worker) setupWithinTimeout(
+	ctx, pipeCtx context.Context, setup processor.Setup,
+) (bool, error) {
+	setupCtx, abandon := context.WithCancel(pipeCtx)
 	done := make(chan error, 1)
-	go func() { done <- t.pipeline.Setup(ctx, setup) }()
+	go func() { done <- t.pipeline.Setup(setupCtx, setup) }()
 
 	timeout := time.NewTimer(t.cfg.SetupTimeout)
 	defer timeout.Stop()
 	select {
 	case err := <-done:
+		// Not abandoned: the processors keep the context they were set up with
+		// for as long as they run.
+		_ = abandon
 		return err == nil, err
 	case <-timeout.C:
 		slog.Error("timed out setting the pipeline up, stopping it "+
 			"(a processor blocked while connecting?)", "timeout", t.cfg.SetupTimeout)
-		t.Call(ctx, EventSetupTimeout, t)
-		return false, nil
+		t.Call(pipeCtx, EventSetupTimeout, t)
+	case <-t.startSig:
+		slog.Debug("pipeline worker canceled while setting up, stopping it", "worker", t.Name())
+	case <-ctx.Done():
+		slog.Debug("pipeline worker's context ended while setting up, stopping it", "worker", t.Name())
 	}
+	abandon()
+	// The processors told to stop are given a moment to wind down before the
+	// pipeline is cleaned up, so a cleanup does not run against a setup still in
+	// progress. One that does not stop in time is left where it is.
+	select {
+	case <-done:
+	case <-time.After(setupWindDownTimeout):
+	}
+	return false, nil
 }
+
+// setupWindDownTimeout bounds how long an abandoned setup is given to stop
+// before the pipeline is cleaned up.
+const setupWindDownTimeout = time.Second
 
 // HasFinished reports whether the task has finished running.
 func (t *Worker) HasFinished() bool {
@@ -1162,7 +1185,7 @@ func (t *Worker) Run(ctx context.Context) error {
 		TracingEnabled:        t.cfg.EnableTracing,
 		Running:               t,
 	}
-	setUp, err := t.setupWithinTimeout(pipeCtx, setup)
+	setUp, err := t.setupWithinTimeout(runCtx, pipeCtx, setup)
 	if err != nil {
 		return err
 	}
