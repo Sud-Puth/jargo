@@ -123,10 +123,10 @@ func TestTranslateDiscardPreservesUserTranscription(t *testing.T) {
 func TestTranslateUserTranscriptionFinalOnly(t *testing.T) {
 	s := &session{events: make(chan Event, eventBuffer)}
 
-	interim := rtvi.UserTranscriptionData{Text: "hel", Final: false}
+	interim := rtvi.UserTranscriptionData{Text: "hel", Final: false} //nolint:staticcheck // still sent
 	wantNoEvent(t, s.translate(msg(t, rtvi.TypeUserTranscription, interim)))
 
-	final := rtvi.UserTranscriptionData{Text: "hello", Final: true}
+	final := rtvi.UserTranscriptionData{Text: "hello", Final: true} //nolint:staticcheck // still sent
 	wantEvent(t, s.translate(msg(t, rtvi.TypeUserTranscription, final)), EventUserTranscription, "hello")
 }
 

@@ -155,10 +155,14 @@ type ObserverParams struct {
 	// bot's side of the conversation. Nil leaves it on.
 	BotOutputEnabled *bool
 	// BotLLMEnabled reports what the model produced: the brackets around a
-	// response and the text inside it. Nil leaves it on.
+	// response and the text inside it. Of these, bot-llm-text is on its way
+	// out, replaced by llm-raw-text (LLMRawTextEnabled); this flag stays for
+	// bot-llm-started and bot-llm-stopped. Nil leaves it on.
 	BotLLMEnabled *bool
 	// BotTTSEnabled reports what the voice is doing: the brackets around a
-	// synthesis and the text as it is spoken. Nil leaves it on.
+	// synthesis and the text as it is spoken. Of these, bot-tts-text is on its
+	// way out, replaced by tts-raw-text (TTSRawTextEnabled); this flag stays
+	// for bot-tts-started and bot-tts-stopped. Nil leaves it on.
 	BotTTSEnabled *bool
 	// BotSpeakingEnabled reports when the bot's audio starts and stops playing,
 	// and when it was cut off. Nil leaves it on.
@@ -169,6 +173,9 @@ type ObserverParams struct {
 	UserSpeakingEnabled *bool
 	// UserTranscriptionEnabled reports what the user said, both the interim
 	// guesses and the final transcript. Nil leaves it on.
+	//
+	// Deprecated: it only turns off user-transcription, which is deprecated in
+	// favor of user-input and stt-raw-text. There is no replacement.
 	UserTranscriptionEnabled *bool
 	// UserInputEnabled reports what the user said or typed: transcriptions,
 	// interim ones included, backchannels, and the text the client sent. Nil
@@ -229,6 +236,17 @@ type ObserverParams struct {
 	// BotAudioLevelEnabled reports how loud the bot is. Off by default, for the
 	// same reason.
 	BotAudioLevelEnabled bool
+	// STTRawTextEnabled reports each transcription, interim ones included, as
+	// the STT produced it. Only sent to clients of protocol 2.2.0 or later. Off
+	// by default.
+	STTRawTextEnabled bool
+	// LLMRawTextEnabled reports each chunk of text the LLM streams. Only sent to
+	// clients of protocol 2.2.0 or later. Off by default.
+	LLMRawTextEnabled bool
+	// TTSRawTextEnabled reports the text the TTS speaks, as it is spoken, and
+	// leaves out the same text types as bot output. Only sent to clients of
+	// protocol 2.2.0 or later. Off by default.
+	TTSRawTextEnabled bool
 	// AudioLevelPeriod is how often an audio level is reported while it is
 	// enabled; zero defaults to 150 ms. Audio arrives far more often than a
 	// meter can usefully be redrawn, and measuring loudness is not free, so the
@@ -566,6 +584,21 @@ func (o *Observer) clientIsAtLeast(version [3]int) bool {
 // backchannel text type, which came with protocol 2.2.0.
 func (o *Observer) clientSupportsBackchannels() bool {
 	return o.clientIsAtLeast([3]int{2, 2, 0})
+}
+
+// clientSupportsRawText reports whether the connected client knows the raw
+// text messages, which came with protocol 2.2.0.
+func (o *Observer) clientSupportsRawText() bool {
+	return o.clientIsAtLeast([3]int{2, 2, 0})
+}
+
+// rawTextEnabled reports whether the raw text messages pick chooses are sent:
+// turned on, and to a client that knows them.
+func (o *Observer) rawTextEnabled(pick func(ObserverParams) bool) bool {
+	o.paramsMu.Lock()
+	on := pick(o.params)
+	o.paramsMu.Unlock()
+	return on && o.clientSupportsRawText()
 }
 
 // skipsAggregation reports whether text of this type is kept from bot output

@@ -65,10 +65,11 @@ whether to carry on. `Processor.ClientVersion` reports what the client declared.
 | Type | Meaning |
 |---|---|
 | `client-ready` → `bot-ready` | The handshake. |
-| `user-transcription` | What the user said (interim and final). |
+| `user-transcription` | What the user said (interim and final). Deprecated: read `user-input` or `stt-raw-text`. |
 | `user-input` | What the user said or typed: transcriptions (interim and final), backchannels, and the text sent with `send-text`, acknowledged with its id and, when the transport knows, its sender. |
 | `bot-transcription` | What the bot said. |
-| `bot-llm-text` / `bot-tts-text` | Streamed response text, per stage. |
+| `bot-llm-text` / `bot-tts-text` | Streamed response text, per stage. Deprecated: read `llm-raw-text` and `tts-raw-text`. |
+| `stt-raw-text` / `llm-raw-text` / `tts-raw-text` | The text each service produced, as it produced it. Off by default, and only sent to clients of protocol 2.2.0 or later. |
 | `user-started-speaking` / `user-stopped-speaking` | Turn boundaries. |
 | `vad-user-started-speaking` / `vad-user-stopped-speaking` | The raw VAD signal, off by default. |
 | `bot-started-speaking` / `bot-stopped-speaking` | Bot speech boundaries. |

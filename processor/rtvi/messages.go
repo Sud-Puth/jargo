@@ -31,24 +31,30 @@ const (
 
 // Message types exchanged over the data channel.
 const (
-	TypeClientReady          = "client-ready"
-	TypeSendText             = "send-text"
-	TypeDisconnectBot        = "disconnect-bot"
-	TypeClientMessage        = "client-message"
-	TypeFunctionCallResult   = "llm-function-call-result"
-	TypeRawAudio             = "raw-audio"
-	TypeRawAudioBatch        = "raw-audio-batch"
-	TypeBotReady             = "bot-ready"
-	TypeServerMessage        = "server-message"
-	TypeServerResponse       = "server-response"
-	TypeErrorResponse        = "error-response"
-	TypeError                = "error"
+	TypeClientReady        = "client-ready"
+	TypeSendText           = "send-text"
+	TypeDisconnectBot      = "disconnect-bot"
+	TypeClientMessage      = "client-message"
+	TypeFunctionCallResult = "llm-function-call-result"
+	TypeRawAudio           = "raw-audio"
+	TypeRawAudioBatch      = "raw-audio-batch"
+	TypeBotReady           = "bot-ready"
+	TypeServerMessage      = "server-message"
+	TypeServerResponse     = "server-response"
+	TypeErrorResponse      = "error-response"
+	TypeError              = "error"
+	// The user-transcription, bot-tts-text and bot-llm-text messages are
+	// deprecated, replaced by the raw text messages and user-input. See
+	// UserTranscription, BotTTSText and BotLLMText.
 	TypeUserTranscription    = "user-transcription"
 	TypeUserInput            = "user-input"
 	TypeBotOutput            = "bot-output"
 	TypeBotTranscription     = "bot-transcription"
 	TypeBotTTSText           = "bot-tts-text"
 	TypeBotLLMText           = "bot-llm-text"
+	TypeSTTRawText           = "stt-raw-text"
+	TypeLLMRawText           = "llm-raw-text"
+	TypeTTSRawText           = "tts-raw-text"
 	TypeBotLLMMarker         = "bot-llm-marker"
 	TypeUserLLMText          = "user-llm-text"
 	TypeUserMuteStarted      = "user-mute-started"
@@ -414,13 +420,29 @@ func BotTranscription(text string) Message {
 }
 
 // BotTTSText builds a bot-tts-text message.
+//
+// Deprecated: use TTSRawText.
 func BotTTSText(text string) Message {
 	return newMessage(TypeBotTTSText, "", TextData{Text: text})
 }
 
 // BotLLMText builds a bot-llm-text message.
+//
+// Deprecated: use LLMRawText.
 func BotLLMText(text string) Message {
 	return newMessage(TypeBotLLMText, "", TextData{Text: text})
+}
+
+// LLMRawText builds an llm-raw-text message: a chunk of text as the LLM
+// streamed it.
+func LLMRawText(text string) Message {
+	return newMessage(TypeLLMRawText, "", TextData{Text: text})
+}
+
+// TTSRawText builds a tts-raw-text message: text the TTS speaks, as it is
+// spoken.
+func TTSRawText(text string) Message {
+	return newMessage(TypeTTSRawText, "", TextData{Text: text})
 }
 
 // BotLLMMarkerData is the payload of a bot-llm-marker message: the sideband
@@ -528,6 +550,8 @@ type DTMFData struct {
 }
 
 // UserTranscriptionData is the payload of a user-transcription message.
+//
+// Deprecated: use STTRawTextData.
 type UserTranscriptionData struct {
 	Text      string `json:"text"`
 	UserID    string `json:"user_id"`
@@ -536,8 +560,33 @@ type UserTranscriptionData struct {
 }
 
 // UserTranscription builds a user-transcription message.
+//
+// Deprecated: use STTRawText, or UserInput for what the user said.
 func UserTranscription(text, userID, timestamp string, final bool) Message {
 	return newMessage(TypeUserTranscription, "", UserTranscriptionData{
+		Text:      text,
+		UserID:    userID,
+		Timestamp: timestamp,
+		Final:     final,
+	})
+}
+
+// STTRawTextData is the payload of an stt-raw-text message.
+type STTRawTextData struct {
+	// Text is the transcribed text.
+	Text string `json:"text"`
+	// UserID identifies the user who spoke.
+	UserID string `json:"user_id"`
+	// Timestamp is when the user said it.
+	Timestamp string `json:"timestamp"`
+	// Final is whether the transcription is final, as opposed to interim.
+	Final bool `json:"final"`
+}
+
+// STTRawText builds an stt-raw-text message: a transcription as the STT
+// produced it, interim ones included.
+func STTRawText(text, userID, timestamp string, final bool) Message {
+	return newMessage(TypeSTTRawText, "", STTRawTextData{
 		Text:      text,
 		UserID:    userID,
 		Timestamp: timestamp,

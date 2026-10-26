@@ -1128,7 +1128,7 @@ func (s *session) translate(in rtvi.Incoming) *Event {
 	case rtvi.TypeUserStoppedSpeaking:
 		return &Event{Kind: EventUserStoppedSpeaking}
 	case rtvi.TypeUserTranscription:
-		var d rtvi.UserTranscriptionData
+		var d rtvi.UserTranscriptionData //nolint:staticcheck // the message is still sent
 		if json.Unmarshal(in.Data, &d) != nil || !d.Final {
 			return nil // only final transcriptions are turn-level events
 		}

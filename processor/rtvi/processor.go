@@ -314,8 +314,11 @@ func (o *Observer) transcriptionMessages(text, userID, timestamp string, final b
 			Text: text, InputType: UserInputTranscription, Timestamp: timestamp, Final: final, UserID: userID,
 		}))
 	}
+	if o.rawTextEnabled(sttRawTextOf) {
+		msgs = append(msgs, STTRawText(text, userID, timestamp, final))
+	}
 	if o.enabled(transcriptionOf) {
-		msgs = append(msgs, UserTranscription(text, userID, timestamp, final))
+		msgs = append(msgs, UserTranscription(text, userID, timestamp, final)) //nolint:staticcheck // still sent
 	}
 	return msgs
 }
@@ -356,16 +359,21 @@ func (o *Observer) userMessageFor(f frames.Frame) (Message, bool) {
 
 // The categories a message can belong to, named so a gate reads as the thing it
 // controls rather than as a field lookup.
-func transcriptionOf(p ObserverParams) *bool { return p.UserTranscriptionEnabled }
-func userInputOf(p ObserverParams) *bool     { return p.UserInputEnabled }
-func userSpeakingOf(p ObserverParams) *bool  { return p.UserSpeakingEnabled }
-func metricsOf(p ObserverParams) *bool       { return p.MetricsEnabled }
-func botSpeakingOf(p ObserverParams) *bool   { return p.BotSpeakingEnabled }
-func botLLMOf(p ObserverParams) *bool        { return p.BotLLMEnabled }
-func botTTSOf(p ObserverParams) *bool        { return p.BotTTSEnabled }
-func botOutputOf(p ObserverParams) *bool     { return p.BotOutputEnabled }
-func userLLMOf(p ObserverParams) *bool       { return p.UserLLMEnabled }
-func userMuteOf(p ObserverParams) *bool      { return p.UserMuteEnabled }
+func transcriptionOf(p ObserverParams) *bool {
+	return p.UserTranscriptionEnabled //nolint:staticcheck // the deprecated field is honored
+}
+func userInputOf(p ObserverParams) *bool    { return p.UserInputEnabled }
+func sttRawTextOf(p ObserverParams) bool    { return p.STTRawTextEnabled }
+func llmRawTextOf(p ObserverParams) bool    { return p.LLMRawTextEnabled }
+func ttsRawTextOf(p ObserverParams) bool    { return p.TTSRawTextEnabled }
+func userSpeakingOf(p ObserverParams) *bool { return p.UserSpeakingEnabled }
+func metricsOf(p ObserverParams) *bool      { return p.MetricsEnabled }
+func botSpeakingOf(p ObserverParams) *bool  { return p.BotSpeakingEnabled }
+func botLLMOf(p ObserverParams) *bool       { return p.BotLLMEnabled }
+func botTTSOf(p ObserverParams) *bool       { return p.BotTTSEnabled }
+func botOutputOf(p ObserverParams) *bool    { return p.BotOutputEnabled }
+func userLLMOf(p ObserverParams) *bool      { return p.UserLLMEnabled }
+func userMuteOf(p ObserverParams) *bool     { return p.UserMuteEnabled }
 
 // gated reports msg unless its category was turned off, and reports either way
 // that the frame was recognized: a frame the observer is silent about is still
@@ -430,10 +438,14 @@ func (o *Observer) llmTextMessages(f frames.Frame) ([]Message, bool) {
 	if !ok {
 		return nil, false
 	}
-	if !o.enabled(botLLMOf) {
-		return nil, true
+	var msgs []Message
+	if o.rawTextEnabled(llmRawTextOf) {
+		msgs = append(msgs, LLMRawText(fr.Text))
 	}
-	msgs := []Message{BotLLMText(fr.Text)}
+	if !o.enabled(botLLMOf) {
+		return msgs, true
+	}
+	msgs = append(msgs, BotLLMText(fr.Text)) //nolint:staticcheck // still sent
 	if sentence, done := o.gatherTranscription(fr.Text); done {
 		msgs = append(msgs, BotTranscription(sentence))
 	}
@@ -596,8 +608,11 @@ func (o *Observer) segmentMessages(seg segment) []Message {
 	}
 	// The caption is a channel of its own and is not suppressed with the
 	// segment: a client rendering spoken text word by word still wants each one.
+	if seg.spoken && o.rawTextEnabled(ttsRawTextOf) {
+		msgs = append(msgs, TTSRawText(text))
+	}
 	if seg.spoken && o.enabled(botTTSOf) {
-		msgs = append(msgs, BotTTSText(text))
+		msgs = append(msgs, BotTTSText(text)) //nolint:staticcheck // still sent
 	}
 	return msgs
 }
