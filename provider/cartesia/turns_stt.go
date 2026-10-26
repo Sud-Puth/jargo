@@ -3,6 +3,7 @@ package cartesia
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,7 +18,9 @@ import (
 	"github.com/gojargo/jargo/processor/turns"
 	"github.com/gojargo/jargo/service/settings"
 	"github.com/gojargo/jargo/service/stt"
+	"github.com/gojargo/jargo/service/wsservice"
 	"github.com/gojargo/jargo/service/wsutil"
+	errs "github.com/gojargo/jargo/utils/errors"
 )
 
 const (
@@ -26,6 +29,9 @@ const (
 	// turnsDrainWindow is how long the server is given to flush the turns it was
 	// still holding once it has been told the session is closing.
 	turnsDrainWindow = 2 * time.Second
+	// turnsConnectionTimeout is how long to wait for the server's connected
+	// message after the handshake before treating the connection as failed.
+	turnsConnectionTimeout = 10 * time.Second
 )
 
 // Cartesia turn-detection message types.
@@ -118,7 +124,12 @@ func NewTurnsSTT(cfg TurnsSTTConfig) *stt.StreamService {
 	if cfg.Model == "" {
 		cfg.Model = defaultTurnsModel
 	}
-	return stt.NewStream("CartesiaTurnsSTT", newTurnsConnector(cfg), cfg.SampleRate)
+	c := newTurnsConnector(cfg)
+	svc := stt.NewStream("CartesiaTurnsSTT", c, cfg.SampleRate)
+	// The connector reports the errors the server sends through the service, so
+	// they are classified like any other.
+	c.svc = svc
+	return svc
 }
 
 type turnsConnector struct {
@@ -127,6 +138,12 @@ type turnsConnector struct {
 	// session already running, but an update still lands in it so the service
 	// can say so.
 	live *TurnsSTTSettings
+	// svc is the service this connector drives, for reporting the errors the
+	// server sends over the connection.
+	svc *stt.StreamService
+	// connectionTimeout bounds the wait for the server to confirm a session.
+	// Held here rather than read from the constant so a test can shorten it.
+	connectionTimeout time.Duration
 }
 
 // TurnsSTTSettings is the part of the turn-detecting configuration that can
@@ -143,7 +160,7 @@ type TurnsSTTSettings struct {
 // newTurnsConnector builds the connector with its settings seeded, which is the
 // only way it should be built: the settings store is not optional.
 func newTurnsConnector(cfg TurnsSTTConfig) *turnsConnector {
-	return &turnsConnector{cfg: cfg, live: newTurnsSettings(cfg)}
+	return &turnsConnector{cfg: cfg, live: newTurnsSettings(cfg), connectionTimeout: turnsConnectionTimeout}
 }
 
 // newTurnsSettings is the starting state, taken from what the service was built
@@ -193,8 +210,11 @@ func (c *turnsConnector) TurnWatchdog() stt.TurnWatchdogOptions {
 	return stt.TurnWatchdogOptions{MinTimeout: c.cfg.WatchdogMinTimeout}
 }
 
-// Connect opens a turn-detection session and waits for the server to
-// acknowledge it.
+// Connect opens a turn-detection session.
+//
+// The server confirms the session with a connected message, which the read loop
+// waits for (see Recv). The server takes audio as soon as the socket opens,
+// ahead of that message.
 func (c *turnsConnector) Connect(ctx context.Context, sampleRate int) (stt.Stream, error) {
 	q := url.Values{}
 	q.Set("model", c.live.Model.Or(c.cfg.Model))
@@ -219,12 +239,18 @@ func (c *turnsConnector) Connect(ctx context.Context, sampleRate int) (stt.Strea
 	if err != nil {
 		return nil, err
 	}
-	s := &turnsStream{conn: conn, ctx: ctx, cfg: c.cfg}
-	if err := s.awaitConnected(); err != nil {
-		_ = conn.Close(websocket.StatusInternalError, "no session acknowledgement")
-		return nil, err
+	return &turnsStream{
+		conn: conn, ctx: ctx, cfg: c.cfg, report: c.report, connectWait: c.connectionTimeout,
+	}, nil
+}
+
+// report puts an error the server sent on the pipeline, with the error behind
+// it so it is classified.
+func (c *turnsConnector) report(ctx context.Context, err error) {
+	if c.svc == nil {
+		return
 	}
-	return s, nil
+	c.svc.PushError(ctx, err.Error(), err, false)
 }
 
 type turnsStream struct {
@@ -232,29 +258,75 @@ type turnsStream struct {
 	ctx     context.Context
 	cfg     TurnsSTTConfig
 	writeMu sync.Mutex
+	// report puts an error the server sent on the pipeline.
+	report func(ctx context.Context, err error)
+	// connectWait bounds the wait for the server to confirm this session.
+	connectWait time.Duration
+	// confirmed records that the server has confirmed the session. Read loop
+	// only.
+	confirmed bool
 }
 
-// awaitConnected reads until the server acknowledges the session, so audio is
-// not sent to one it has not opened yet. Nothing else is sent before the
-// acknowledgement, so nothing is consumed by waiting for it.
+// awaitConnected handles messages until the server confirms the session.
+//
+// A connection the server never confirms is retried like a dropped one: the
+// wait ends with an error wrapping wsservice.ErrNotConfirmed, which the read
+// loop counts as failing right after connecting, giving up after a few in a
+// row. The server validates a connection's settings after the handshake,
+// sending an error in place of connected and then closing the connection; that
+// error carries the HTTP status the server gives it, so a rejected setting is
+// classified as the permanent failure it is rather than retried.
 func (s *turnsStream) awaitConnected() error {
-	for {
-		_, data, err := s.conn.Read(s.ctx)
-		if err != nil {
-			return err
+	read := func(ctx context.Context) ([]byte, error) {
+		_, data, err := s.conn.Read(ctx)
+		return data, err
+	}
+	err := wsservice.ReceiveUntilConfirmed(s.ctx, read, s.handleUnconfirmed, s.connectWait)
+	if errors.Is(err, wsservice.ErrNotConfirmed) {
+		return fmt.Errorf("cartesia: %w", err)
+	}
+	return err
+}
+
+// handleUnconfirmed handles one message read while the session is waiting to be
+// confirmed, and reports whether it was the confirmation.
+func (s *turnsStream) handleUnconfirmed(data []byte) (bool, error) {
+	var m turnsMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false, nil //nolint:nilerr // a message that does not parse is skipped, not fatal
+	}
+	switch m.Type {
+	case turnsConnected:
+		slog.Debug("connected to the Cartesia turn-detection endpoint", "request_id", m.RequestID)
+		return true, nil
+	case turnsError:
+		err := m.serverError()
+		if m.StatusCode != 0 {
+			err = errs.NewHTTPStatusError(m.StatusCode, err)
 		}
-		var m turnsMessage
-		if json.Unmarshal(data, &m) != nil {
-			continue
-		}
-		switch m.Type {
-		case turnsConnected:
-			slog.Debug("connected to the Cartesia turn-detection endpoint",
-				"request_id", m.RequestID)
-			return nil
-		case turnsError:
-			return fmt.Errorf("%w: %s", errSTTProtocol, m.Message)
-		}
+		s.reportError(err)
+		return false, err
+	}
+	return false, nil
+}
+
+// ensureConfirmed waits for the server to confirm the session, the first time
+// it is read from.
+func (s *turnsStream) ensureConfirmed() error {
+	if s.confirmed {
+		return nil
+	}
+	if err := s.awaitConnected(); err != nil {
+		return err
+	}
+	s.confirmed = true
+	return nil
+}
+
+// reportError puts an error the server sent on the pipeline.
+func (s *turnsStream) reportError(err error) {
+	if s.report != nil {
+		s.report(s.ctx, err)
 	}
 }
 
@@ -265,6 +337,23 @@ type turnsMessage struct {
 	Transcript string `json:"transcript"`
 	Message    string `json:"message"`
 	RequestID  string `json:"request_id"`
+	// ErrorCode and StatusCode describe an error: the server's own code, and
+	// the HTTP status it reports with it.
+	ErrorCode  string `json:"error_code"`
+	StatusCode int    `json:"status_code"`
+}
+
+// serverError is the error an error message reports.
+func (m turnsMessage) serverError() error {
+	code := m.ErrorCode
+	if code == "" {
+		code = "unknown"
+	}
+	message := m.Message
+	if message == "" {
+		message = "Unknown error"
+	}
+	return fmt.Errorf("%w [%s]: %s", errSTTProtocol, code, message)
 }
 
 // Send writes a chunk of PCM as a binary frame.
@@ -284,6 +373,9 @@ func (s *turnsStream) Send(audio []byte) error {
 // silence can force; the boundary is still reported, and only the empty text is
 // left out so nothing downstream aggregates an empty user message.
 func (s *turnsStream) Recv() ([]stt.Result, error) {
+	if err := s.ensureConfirmed(); err != nil {
+		return nil, err
+	}
 	for {
 		_, data, err := s.conn.Read(s.ctx)
 		if err != nil {
@@ -323,10 +415,15 @@ func (s *turnsStream) Recv() ([]stt.Result, error) {
 			}
 			continue
 		case turnsError:
-			return nil, fmt.Errorf("%w: %s", errSTTProtocol, m.Message)
+			// Reported, and the session carries on: an error on a confirmed
+			// session is the server's to recover from, and the connection is
+			// still up.
+			s.reportError(m.serverError())
+			continue
 		case turnsConnected:
 			// Session bookkeeping, with no transcript to emit and no boundary to
-			// report. Already consumed at connect time, so this is a repeat.
+			// report. Already consumed when the session was confirmed, so this is
+			// a repeat.
 			continue
 		}
 	}

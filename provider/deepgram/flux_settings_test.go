@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gojargo/jargo/service/settings"
+	"github.com/gojargo/jargo/service/wsservice"
 	errs "github.com/gojargo/jargo/utils/errors"
 )
 
@@ -436,33 +437,32 @@ func TestFluxUnrecognizedErrorCodeFallsBack(t *testing.T) {
 	}
 }
 
-// An endpoint that never confirms the session fails the connection instead of
-// leaving it opening forever with audio piling up behind it.
+// An endpoint that never confirms the session fails the session instead of
+// leaving it waiting forever. The connection opens, and the first read gives up
+// once the bound passes.
 func TestFluxConnectionWaitTimesOutInsteadOfHanging(t *testing.T) {
 	srv := newFluxFakeServer(t, false)
 	c := newFluxConnector(FluxConfig{APIKey: "k", ListenURL: wsURL(srv.URL), Model: defaultFluxModel})
 	c.connectionTimeout = 50 * time.Millisecond
 
-	_, err := c.Connect(t.Context(), 16000)
-	if err == nil {
-		t.Fatal("connect returned a session the endpoint never confirmed")
+	stream, err := c.Connect(t.Context(), 16000)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
-	if !errors.Is(err, errFluxNotConfirmed) {
-		t.Errorf("err = %v, want an unconfirmed connection", err)
+	t.Cleanup(func() { _ = stream.Close() })
+	if _, err := stream.Recv(); !errors.Is(err, wsservice.ErrNotConfirmed) {
+		t.Errorf("Recv = %v, want an unconfirmed connection", err)
 	}
 }
 
-// A silent endpoint means the settings were rejected, not that the network was
-// slow: Flux answers a connection setting it will not accept with silence.
-func TestFluxUnconfirmedConnectionIsARejectedRequest(t *testing.T) {
+// An unconfirmed connection is left to the shared classification: Flux refuses
+// unsupported settings with an HTTP 400 during the handshake, so silence after
+// it is not a rejected request, and the connection is retried.
+func TestFluxUnconfirmedConnectionIsNotARejectedRequest(t *testing.T) {
 	c := newFluxConnector(FluxConfig{APIKey: "k", Model: defaultFluxModel})
 
-	got := c.ClassifyError(errFluxNotConfirmed)
-	if got != errs.InvalidRequest {
-		t.Errorf("category = %v, want %v", got, errs.InvalidRequest)
-	}
-	if !got.IsPermanent() {
-		t.Error("the category is not permanent, so the service would keep retrying a rejected request")
+	if got := c.ClassifyError(wsservice.ErrNotConfirmed); got != errs.Unset {
+		t.Errorf("category = %v, want the shared classification to decide", got)
 	}
 }
 

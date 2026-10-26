@@ -22,6 +22,7 @@ import (
 	"github.com/gojargo/jargo/processor/turns"
 	"github.com/gojargo/jargo/service/settings"
 	"github.com/gojargo/jargo/service/stt"
+	"github.com/gojargo/jargo/service/wsservice"
 	"github.com/gojargo/jargo/service/wsutil"
 	errs "github.com/gojargo/jargo/utils/errors"
 )
@@ -74,14 +75,6 @@ const (
 	fluxEventUpdate          = "Update"
 	fluxDefaultLanguageForEn = "en"
 )
-
-// errFluxNotConfirmed is returned when Flux accepted the socket but never
-// confirmed the session was ready. Flux stays silent rather than refusing the
-// connection when a setting is unsupported, so an unconfirmed connection means
-// the request was rejected, not that the network was slow.
-//
-//nolint:gochecknoglobals // sentinel error
-var errFluxNotConfirmed = errors.New("deepgram flux: the connection was never confirmed")
 
 // fluxFatalError is a fatal error Flux reported over the connection. It carries
 // the code Flux named so the failure can be classified: reported in the protocol
@@ -407,9 +400,6 @@ func (c *fluxConnector) currentStream() *fluxStream {
 // Flux reports these over the connection rather than as an HTTP status, so they
 // carry nothing the shared classification can read.
 func (c *fluxConnector) ClassifyError(err error) errs.Category {
-	if errors.Is(err, errFluxNotConfirmed) {
-		return errs.InvalidRequest
-	}
 	if fatal, ok := errors.AsType[*fluxFatalError](err); ok {
 		return fluxPermanentErrorCodes[fatal.code]
 	}
@@ -446,8 +436,11 @@ func (c *fluxConnector) Metadata() stt.Metadata {
 	}
 }
 
-// Connect dials the Flux transcription WebSocket for the given sample rate and
-// waits for Flux to confirm the session is ready.
+// Connect dials the Flux transcription WebSocket for the given sample rate.
+//
+// Flux confirms the session with a Connected message, which the read loop waits
+// for (see Recv): a dial does not hold up whatever triggered it, the audio
+// path included, for the length of that wait.
 func (c *fluxConnector) Connect(ctx context.Context, sampleRate int) (stt.Stream, error) {
 	q := fluxQuery(c.cfg, c.live, sampleRate)
 
@@ -468,22 +461,26 @@ func (c *fluxConnector) Connect(ctx context.Context, sampleRate int) (stt.Stream
 		watchdogMin: c.cfg.WatchdogMinTimeout,
 		lastAudio:   time.Now(),
 		connectWait: c.connectionTimeout,
+		fail:        c.reportFailure,
 	}
 	if v, ok := c.live.MinConfidence.Value(); ok {
 		s.minConf = &v
 	}
 
-	if err := s.awaitConnected(); err != nil {
-		_ = conn.Close(websocket.StatusInternalError, "not confirmed")
-		return nil, err
-	}
-
-	s.wg.Go(s.watchdog)
-
 	c.mu.Lock()
 	c.stream = s
 	c.mu.Unlock()
 	return s, nil
+}
+
+// reportFailure puts a failure that ends the session on the pipeline, with the
+// error behind it, so it is classified: a failure Flux names as permanent costs
+// the service its usability, and the read loop does not reconnect into it.
+func (c *fluxConnector) reportFailure(ctx context.Context, err error) {
+	if c.svc == nil {
+		return
+	}
+	c.svc.PushError(ctx, err.Error(), err, false)
 }
 
 // reportProblem puts a problem the session survived on the pipeline, so an
@@ -508,8 +505,16 @@ type fluxStream struct {
 	live *FluxSettings
 	// report puts a problem the session survived on the pipeline.
 	report func(ctx context.Context, msg string)
+	// fail puts a failure that ends the session on the pipeline.
+	fail func(ctx context.Context, err error)
 	// connectWait bounds the wait for Flux to confirm this session.
 	connectWait time.Duration
+	// confirmed records that Flux has confirmed the session. Read loop only.
+	confirmed bool
+	// lifeMu guards closed, which Close sets so a confirmation arriving as the
+	// session closes does not start a watchdog Close is no longer waiting for.
+	lifeMu sync.Mutex
+	closed bool
 
 	writeMu sync.Mutex
 	wg      sync.WaitGroup
@@ -542,41 +547,63 @@ type fluxStream struct {
 	configurePending map[string]any
 }
 
-// awaitConnected reads until Flux confirms the session is ready. Anything read
-// meanwhile is kept for the first Recv, so a message that arrived ahead of the
-// confirmation is not lost.
+// awaitConnected handles messages until Flux confirms the session is ready.
+// Anything read meanwhile is kept for the first Recv, so a message that arrived
+// ahead of the confirmation is not lost.
 //
-// The wait is bounded because Flux answers a connection setting it will not
-// accept with silence rather than a refusal: without a bound the session opens
-// forever and audio piles up behind it.
+// Flux refuses unsupported settings with an HTTP 400 during the handshake, so a
+// connection that opens but never confirms is retried like a dropped one: the
+// wait ends with an error wrapping wsservice.ErrNotConfirmed, which the read
+// loop counts as failing right after connecting, giving up after a few in a row.
 func (s *fluxStream) awaitConnected() error {
-	ctx, cancel := context.WithTimeout(s.ctx, s.connectWait)
-	defer cancel()
-
-	for {
+	read := func(ctx context.Context) ([]byte, error) {
 		_, data, err := s.conn.Read(ctx)
-		if err != nil {
-			if ctx.Err() != nil && s.ctx.Err() == nil {
-				return fmt.Errorf("%w within %s; the endpoint may not accept the current connection settings",
-					errFluxNotConfirmed, s.connectWait)
-			}
-			return fmt.Errorf("deepgram flux: waiting for the connection: %w", err)
-		}
-		var m fluxMessage
-		if json.Unmarshal(data, &m) != nil {
-			continue
-		}
-		switch m.Type {
-		case fluxMsgConnected:
-			return nil
-		case fluxMsgError:
-			return &fluxFatalError{code: m.errCode(), text: "deepgram flux: " + m.errText()}
-		case fluxMsgTurnInfo:
-			s.trackTurn(m.Event)
-			s.pending = append(s.pending, fluxResults(m, s.model, s.minConfidence())...)
-		default:
-		}
+		return data, err
 	}
+	err := wsservice.ReceiveUntilConfirmed(s.ctx, read, s.handleUnconfirmed, s.connectWait)
+	if errors.Is(err, wsservice.ErrNotConfirmed) {
+		return fmt.Errorf("deepgram flux: %w", err)
+	}
+	return err
+}
+
+// handleUnconfirmed handles one message read while the session is waiting to be
+// confirmed, and reports whether it was the confirmation.
+func (s *fluxStream) handleUnconfirmed(data []byte) (bool, error) {
+	var m fluxMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false, nil //nolint:nilerr // a message that does not parse is skipped, not fatal
+	}
+	switch m.Type {
+	case fluxMsgConnected:
+		return true, nil
+	case fluxMsgError:
+		return false, s.fatal(m)
+	case fluxMsgTurnInfo:
+		s.trackTurn(m.Event)
+		s.pending = append(s.pending, fluxResults(m, s.model, s.minConfidence())...)
+	default:
+	}
+	return false, nil
+}
+
+// startWatchdog starts the watchdog once the session is confirmed: it runs for a
+// confirmed session only, and not for one already closing.
+func (s *fluxStream) startWatchdog() {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if !s.closed {
+		s.wg.Go(s.watchdog)
+	}
+}
+
+// fatal reports the fatal error Flux sent and returns it, ending the session.
+func (s *fluxStream) fatal(m fluxMessage) error {
+	err := &fluxFatalError{code: m.errCode(), text: "deepgram flux: " + m.errText()}
+	if s.fail != nil {
+		s.fail(s.ctx, err)
+	}
+	return err
 }
 
 // minConfidence is the confidence floor in force right now.
@@ -770,6 +797,13 @@ func (s *fluxStream) Send(audio []byte) error {
 // StartOfTurn events become interim results; EndOfTurn becomes a finalized,
 // end-of-turn result.
 func (s *fluxStream) Recv() ([]stt.Result, error) {
+	if !s.confirmed {
+		if err := s.awaitConnected(); err != nil {
+			return nil, err
+		}
+		s.confirmed = true
+		s.startWatchdog()
+	}
 	// Anything that arrived while the session was still being confirmed is
 	// delivered first, in the order it came.
 	if len(s.pending) > 0 {
@@ -792,7 +826,7 @@ func (s *fluxStream) Recv() ([]stt.Result, error) {
 		}
 		switch m.Type {
 		case fluxMsgError:
-			return nil, &fluxFatalError{code: m.errCode(), text: "deepgram flux: " + m.errText()}
+			return nil, s.fatal(m)
 		case fluxMsgTurnInfo:
 			s.trackTurn(m.Event)
 			if res := fluxResults(m, s.model, s.minConfidence()); len(res) > 0 {
@@ -964,6 +998,9 @@ func (s *fluxStream) sendSilence(durationSecs float64) error {
 
 // Close asks Flux to finish the stream and then closes the socket.
 func (s *fluxStream) Close() error {
+	s.lifeMu.Lock()
+	s.closed = true
+	s.lifeMu.Unlock()
 	s.writeMu.Lock()
 	_ = s.conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"CloseStream"}`))
 	s.writeMu.Unlock()

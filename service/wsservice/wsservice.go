@@ -226,6 +226,13 @@ func (b *Base) maybeTryReconnect(ctx context.Context, message string, err error,
 		return false
 	}
 
+	if errors.Is(err, ErrNotConfirmed) {
+		// The connection never carried a session, so it counts as failing right
+		// after connecting, and the receive loop gives up after a few in a row
+		// rather than retrying forever.
+		b.setLastConnect(b.now())
+	}
+
 	if last := b.lastConnectTime(); !last.IsZero() {
 		lasted := b.now().Sub(last)
 		result := b.tracker.Record(lasted)

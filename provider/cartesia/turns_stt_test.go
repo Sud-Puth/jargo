@@ -15,6 +15,7 @@ import (
 	"github.com/gojargo/jargo/internal/providertest"
 	"github.com/gojargo/jargo/processor/turns"
 	"github.com/gojargo/jargo/service/stt"
+	errs "github.com/gojargo/jargo/utils/errors"
 )
 
 // TestTurnsSTTConfigValidate pins which fields the provider requires.
@@ -156,41 +157,67 @@ func TestTurnsSTTRecv(t *testing.T) {
 	}
 }
 
-// TestTurnsSTTServerError surfaces a server-reported failure. One that arrives
-// before the session is acknowledged fails the connect, since there is no
-// session to read on; one that arrives after it ends the session.
+// TestTurnsSTTServerError covers the errors the server sends. One that arrives
+// before the session is confirmed rejects the connection's settings, so it ends
+// the session, carrying the HTTP status the server gave it; one that arrives
+// after it is reported and the session carries on.
 func TestTurnsSTTServerError(t *testing.T) {
 	endpoint, _ := turnsServer(t, []map[string]any{
-		{"type": "error", "message": "unsupported sample rate"},
+		{
+			"type": "error", "error_code": "model_not_found", "message": "Could not resolve model.",
+			"status_code": 400,
+		},
 	})
 	conn := newTurnsConnector(TurnsSTTConfig{APIKey: "k", URL: endpoint, Version: defaultVersion})
-	if _, err := conn.Connect(context.Background(), 16000); err == nil {
-		t.Fatal("Connect() = nil error, want the server error surfaced")
-	} else if !strings.Contains(err.Error(), "unsupported sample rate") {
-		t.Errorf("error = %v, want it to carry the server message", err)
+	stream, err := conn.Connect(context.Background(), 16000)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_, err = stream.Recv()
+	_ = stream.Close()
+	if err == nil {
+		t.Fatal("Recv() = nil error, want the rejected settings surfaced")
+	}
+	if !strings.Contains(err.Error(), "model_not_found") || !strings.Contains(err.Error(), "Could not resolve model.") {
+		t.Errorf("error = %v, want it to carry the server's code and message", err)
+	}
+	if got := errs.ClassifyError(err); got != errs.InvalidRequest {
+		t.Errorf("category = %v, want %v from the status the server gave", got, errs.InvalidRequest)
 	}
 
 	endpoint, _ = turnsServer(t, []map[string]any{
 		{"type": "connected", "request_id": "r1"},
 		{"type": "error", "message": "internal failure"},
+		{"type": "turn.start", "transcript": ""},
 	})
 	conn = newTurnsConnector(TurnsSTTConfig{APIKey: "k", URL: endpoint, Version: defaultVersion})
-	stream, err := conn.Connect(context.Background(), 16000)
+	var reported []error
+	stream, err = conn.Connect(context.Background(), 16000)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	defer func() { _ = stream.Close() }()
+	ts, ok := stream.(*turnsStream)
+	if !ok {
+		t.Fatalf("stream is %T, want a turns stream", stream)
+	}
+	ts.report = func(_ context.Context, err error) { reported = append(reported, err) }
 
-	if _, err := stream.Recv(); err == nil {
-		t.Fatal("Recv() = nil error, want the server error surfaced")
-	} else if !strings.Contains(err.Error(), "internal failure") {
-		t.Errorf("error = %v, want it to carry the server message", err)
+	res, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv() = %v, want the session to carry on past the error", err)
+	}
+	if len(res) != 1 || res[0].Speech != stt.SpeechStarted {
+		t.Errorf("results = %+v, want the turn start after the error", res)
+	}
+	if len(reported) != 1 || !strings.Contains(reported[0].Error(), "internal failure") {
+		t.Errorf("reported %v, want the server error", reported)
 	}
 }
 
-// TestTurnsSTTWaitsForTheAcknowledgement checks the connect does not return
-// until the server has opened the session, so no audio is sent to one that does
-// not exist yet.
+// TestTurnsSTTWaitsForTheAcknowledgement checks the connect returns once the
+// socket is open, and the first read waits for the server to confirm the
+// session, so a dial never holds up the audio path for the length of that wait.
 func TestTurnsSTTWaitsForTheAcknowledgement(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -200,9 +227,14 @@ func TestTurnsSTTWaitsForTheAcknowledgement(t *testing.T) {
 		}
 		defer func() { _ = c.Close(websocket.StatusNormalClosure, "") }()
 		<-release
-		b, _ := json.Marshal(map[string]any{"type": "connected", "request_id": "r1"})
-		if c.Write(r.Context(), websocket.MessageText, b) != nil {
-			return
+		for _, ev := range []map[string]any{
+			{"type": "connected", "request_id": "r1"},
+			{"type": "turn.start", "transcript": ""},
+		} {
+			b, _ := json.Marshal(ev)
+			if c.Write(r.Context(), websocket.MessageText, b) != nil {
+				return
+			}
 		}
 		for {
 			if _, _, err := c.Read(r.Context()); err != nil {
@@ -215,29 +247,31 @@ func TestTurnsSTTWaitsForTheAcknowledgement(t *testing.T) {
 	conn := newTurnsConnector(TurnsSTTConfig{
 		APIKey: "k", URL: "ws" + strings.TrimPrefix(srv.URL, "http"), Version: defaultVersion,
 	})
-	connected := make(chan error, 1)
-	go func() {
-		stream, err := conn.Connect(context.Background(), 16000)
-		if stream != nil {
-			defer func() { _ = stream.Close() }()
-		}
-		connected <- err
-	}()
+	stream, err := conn.Connect(context.Background(), 16000)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = stream.Close() })
 
+	received := make(chan error, 1)
+	go func() {
+		_, err := stream.Recv()
+		received <- err
+	}()
 	select {
-	case err := <-connected:
-		t.Fatalf("Connect returned before the session was acknowledged: %v", err)
+	case err := <-received:
+		t.Fatalf("Recv returned before the session was acknowledged: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	close(release)
 	select {
-	case err := <-connected:
+	case err := <-received:
 		if err != nil {
-			t.Fatalf("Connect: %v", err)
+			t.Fatalf("Recv: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Connect did not return once the session was acknowledged")
+		t.Fatal("Recv did not return once the session was acknowledged")
 	}
 }
 
