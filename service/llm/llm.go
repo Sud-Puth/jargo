@@ -1415,17 +1415,26 @@ func (b *Base) runWithTools(ctx context.Context, convo *frames.LLMContext, tg To
 			return nil
 		},
 	}
+	// The calls are announced before the response ends but run once it has: a
+	// call is under way as soon as it starts, and a fast one would otherwise
+	// report its result ahead of the end of the response that asked for it,
+	// leaving the turn's own text out of the conversation the result runs on.
+	launch := func() {}
 	if err := tg.GenerateWithTools(ctx, convo, s); err != nil && ctx.Err() == nil {
 		b.reportGenerationFailure(ctx, err)
 	} else if ctx.Err() == nil {
-		if err := b.RunFunctionCalls(ctx, convo, calls); err != nil {
+		launchCalls, err := b.announceFunctionCalls(ctx, convo, calls)
+		if err != nil {
 			return err
 		}
+		launch = launchCalls
 	}
 	traceOutput(span, preamble.String())
 	b.emitTiming(ctx, span, time.Since(start))
 	b.pushMarkerResponse(ctx)
-	return b.PushFrame(ctx, frames.NewLLMFullResponseEndFrame(), processor.Downstream)
+	err := b.PushFrame(ctx, frames.NewLLMFullResponseEndFrame(), processor.Downstream)
+	launch()
+	return err
 }
 
 // RunFunctionCalls runs the tool calls a response requested: it narrows them to
@@ -1440,11 +1449,27 @@ func (b *Base) runWithTools(ctx context.Context, convo *frames.LLMContext, tg To
 func (b *Base) RunFunctionCalls(
 	ctx context.Context, convo *frames.LLMContext, calls []frames.ToolCall,
 ) error {
+	launch, err := b.announceFunctionCalls(ctx, convo, calls)
+	if err != nil {
+		return err
+	}
+	launch()
+	return nil
+}
+
+// announceFunctionCalls narrows the calls to the ones that run, announces them,
+// and tracks them, so an interruption from here on cancels them. It returns
+// what sets them going, which the base calls once the response that asked for
+// them has ended.
+func (b *Base) announceFunctionCalls(
+	ctx context.Context, convo *frames.LLMContext, calls []frames.ToolCall,
+) (func(), error) {
+	noop := func() {}
 	if b.callFilter != nil {
 		calls = b.callFilter(convo, calls)
 	}
 	if len(calls) == 0 {
-		return nil
+		return noop, nil
 	}
 	// The built-in cancellation tool is how the model abandons an asynchronous
 	// call, an internal mechanism rather than a tool the application put up, so
@@ -1457,7 +1482,7 @@ func (b *Base) RunFunctionCalls(
 		// call runs as an ordinary one.
 		slog.DebugContext(ctx, "a speculative inference wants a tool call, withdrawing it",
 			"service", b.Name())
-		return b.Broadcast(ctx, func() frames.Frame { return frames.NewEagerEndOfTurnCancelFrame() })
+		return noop, b.Broadcast(ctx, func() frames.Frame { return frames.NewEagerEndOfTurnCancelFrame() })
 	}
 
 	if visible := b.userVisibleCalls(calls); len(visible) > 0 {
@@ -1471,11 +1496,10 @@ func (b *Base) RunFunctionCalls(
 		if err := b.Broadcast(ctx, func() frames.Frame {
 			return frames.NewFunctionCallsStartedFrame(visible)
 		}); err != nil {
-			return err
+			return noop, err
 		}
 	}
-	b.runFunctionCalls(ctx, convo, calls)
-	return nil
+	return b.runFunctionCalls(ctx, convo, calls), nil
 }
 
 // isCancelTool reports whether name belongs to a built-in cancel tool.
@@ -1497,20 +1521,25 @@ func (b *Base) userVisibleCalls(calls []frames.ToolCall) []frames.ToolCall {
 	return slices.DeleteFunc(slices.Clone(calls), internal)
 }
 
-// runFunctionCalls starts every call the model requested this turn and returns
-// without waiting. A handler runs for as long as the work it does takes. Running
-// it here, on the goroutine that processes this service's frames, would hold up
-// every frame queued behind it, including the speech a bot plays to cover the
-// wait.
+// runFunctionCalls tracks every call the model requested this turn and returns
+// what starts them, without waiting for them. A handler runs for as long as the
+// work it does takes. Running it on the goroutine that processes this service's
+// frames would hold up every frame queued behind it, including the speech a bot
+// plays to cover the wait.
+//
+// The calls are tracked here, before they start, so an interruption handled
+// before the launch finds them and cancels them; a call canceled that way never
+// runs its handler.
 //
 // The calls share a group id, which is how the aggregator recognizes them as one
 // batch and answers the batch with a single inference once the last of them has
 // reported, rather than once per call.
-func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, calls []frames.ToolCall) {
+func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, calls []frames.ToolCall) func() {
 	groupID := ""
 	if b.groupCalls {
 		groupID = uuid.NewString()
 	}
+	tracked := make([]*functionCall, 0, len(calls))
 	for _, c := range calls {
 		item, claimed := b.lookupFunction(c.Name)
 		if !claimed {
@@ -1528,18 +1557,22 @@ func (b *Base) runFunctionCalls(ctx context.Context, convo *frames.LLMContext, c
 			groupID:    groupID,
 		}
 		if b.runInParallel {
-			// Tracked before its goroutine is started, so an interruption handled
-			// right after this returns finds the call and cancels it, even if the
-			// goroutine has not run yet.
 			b.trackFunctionCall(call)
-			b.callsWG.Go(func() { b.runFunctionCall(call) })
-			continue
 		}
-		// Sequential: one runner takes them in turn, so no two handlers overlap.
-		select {
-		case b.sequential <- call:
-		case <-b.callsCtx.Done():
-			return
+		tracked = append(tracked, call)
+	}
+	return func() {
+		for _, call := range tracked {
+			if b.runInParallel {
+				b.callsWG.Go(func() { b.runFunctionCall(call) })
+				continue
+			}
+			// Sequential: one runner takes them in turn, so no two handlers overlap.
+			select {
+			case b.sequential <- call:
+			case <-b.callsCtx.Done():
+				return
+			}
 		}
 	}
 }

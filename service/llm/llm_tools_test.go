@@ -1537,3 +1537,62 @@ func TestWithdrawingTheToolLetsItRegisterAgain(t *testing.T) {
 	task.StopWhenDone()
 	<-runDone
 }
+
+// TestAFastToolReportsAfterTheResponseThatAskedForIt checks a tool that answers
+// at once has its call and its result land behind the end of the response that
+// requested it. The aggregator writes the turn's own text into the conversation
+// at that end, so a result arriving ahead of it would run the model on a
+// conversation that lacks what the model said before calling the tool.
+func TestAFastToolReportsAfterTheResponseThatAskedForIt(t *testing.T) {
+	for range 20 {
+		gen := &scriptedGen{turns: [][]frames.ToolCall{{
+			{ID: "call-1", Name: "book_taxi", Args: json.RawMessage(`{}`)},
+		}}}
+		svc := llm.New("FakeLLM", gen)
+		svc.RegisterFunction("book_taxi", func(ctx context.Context, p llm.FunctionCallParams) error {
+			return p.Result(ctx, `{"status":"done"}`, nil)
+		})
+
+		var mu sync.Mutex
+		var order []string
+		reported := make(chan struct{}, 1)
+		probe := newProbe(func(f frames.Frame) {
+			var name string
+			switch f.(type) {
+			case *frames.LLMFullResponseEndFrame:
+				name = "end"
+			case *frames.FunctionCallInProgressFrame:
+				name = "in progress"
+			case *frames.FunctionCallResultFrame:
+				name = "result"
+			default:
+				return
+			}
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			if name == "result" {
+				reported <- struct{}{}
+			}
+		})
+		task := pipeline.NewWorker(pipeline.New(svc, probe), pipeline.WorkerConfig{})
+		runDone := make(chan error, 1)
+		go func() { runDone <- task.Run(context.Background()) }()
+
+		task.QueueFrame(frames.NewLLMContextFrame(toolConvo("book_taxi")))
+		select {
+		case <-reported:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the result never arrived")
+		}
+		task.Cancel(context.Background(), "")
+		<-runDone
+
+		mu.Lock()
+		got := slices.Clone(order)
+		mu.Unlock()
+		if want := []string{"end", "in progress", "result"}; !slices.Equal(got, want) {
+			t.Fatalf("frames arrived as %v, want %v", got, want)
+		}
+	}
+}
