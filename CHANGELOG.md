@@ -15,6 +15,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Perplexity's Agent API.** `perplexity.NewAgentLLM` answers with web search
+  over the OpenAI Responses protocol, with function calling and multi-turn
+  context. It defaults to `openai/gpt-5.6-luna` with the `web_search` tool
+  offered beside the context's tools (`NoWebSearch` turns it off).
+  `AgentConfig` adds `Preset`, `PresetModel` (leave the model to the preset)
+  and `MaxSteps`, and needs a model, a preset, or both. With neither `Preset`
+  nor `Reasoning` set, each request sends Perplexity's `fast` preset, its
+  lowest-latency setup. The web searches Perplexity runs on the server never
+  reach the service as calls to run. Answers can carry citation markers such
+  as `[1]`, and Anthropic models need `MaxOutputTokens` set. The Responses HTTP
+  service gained `HTTPVariant` and `NewHTTPVariantLLM`, the hooks such a
+  server plugs into.
+
+- **Anthropic's effort setting.** `anthropic.Config.Effort` is sent as
+  `output_config.effort`, beside any response schema: how much the model
+  spends on its response, thinking included. `ThinkingConfig` accepts
+  `between_tools`, the setting Claude Sonnet 5.5 runs without up-front
+  thinking under.
+
 - **Thought frames from Anthropic and Gemini.** The Anthropic service streams
   thinking blocks as `LLMThoughtStartFrame`, `LLMThoughtTextFrame` and
   `LLMThoughtEndFrame` (carrying the signature), and every request opts into
@@ -136,6 +155,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   last, so nothing rewrites the markup it inserts.
 
 ### Changed
+
+- **Each model gets the lowest thinking setting its provider documents.** When
+  a request configures no thinking of its own, the Anthropic, Gemini (and
+  Vertex) and Responses services look the model up in a table and send its
+  lowest setting: on Anthropic `between_tools` for Sonnet 5.5, `disabled` where
+  a model allows it and effort `low` where it does not (Opus 5.5, Fable); on
+  Gemini a budget on the 2.5 series and a level from Gemini 3 and Gemma 4; on
+  Responses `minimal`, `none` or the lowest effort a reasoning model accepts.
+  The first request for each model logs what was sent at INFO, and one for a
+  model that can think but is not listed warns that it runs at the provider's
+  default. **Behaviour change:** models that previously ran at the provider's
+  default, such as Gemini 2.5 Pro, the o-series and the pro models, now get
+  their lowest setting, and unlisted flash models no longer get one.
+
+- **The default Gemini models move to 3.8.** The Vertex LLM defaults to
+  `gemini-3.8-flash` (Vertex retires `gemini-3.6-flash` on 2026-11-19), and the
+  Gemini Live and Vertex Live services to `gemini-3.8-live` (Vertex retires
+  `gemini-live-2.5-flash-native-audio` on 2026-12-13). The NVIDIA LLM defaults
+  to `nvidia/nemotron-3.5-super-vl-120b-a12b`, since NVIDIA's endpoint can
+  answer the previous default with a 404. Set the model to keep the old one.
+
+- **Soniox authenticates on the WebSocket handshake.** The STT and TTS services
+  send the key as an `Authorization: Bearer` header instead of in the
+  configuration message, which Soniox stops accepting on 2027-01-15.
 
 - **The `service` label on metrics names the provider, not the instance.** It
   carried the processor's instance name, such as `CartesiaTTS#23`, whose number
@@ -367,6 +410,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Deprecated
 
+- **`perplexity.NewLLM`.** Perplexity has ended support for the Sonar chat
+  completions API it uses. Use `perplexity.NewAgentLLM` instead.
+
 - **`MaxFrames` on the observers.** `TurnTrackingConfig`, `LatencyConfig`,
   `ErrorConfig`, `FunctionCallConfig`, `SpeakingConfig` and
   `ServiceMetricsConfig` keep the field, unused: the observers are told about a
@@ -379,6 +425,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   replacement: choose another TTS provider.
 
 ### Fixed
+
+- **Claude Sonnet 5.5 no longer fails every request.** The Anthropic service
+  sent it thinking `disabled`, which it rejects with a 400; it now gets
+  `between_tools` (see Changed).
+
+- **OpenAI Realtime hears the user at the right speed.** User audio was
+  appended at the pipeline's input rate while the session expects 24 kHz, so
+  the model heard speech 1.5 times too fast at 16 kHz. Input audio is now
+  resampled to 24 kHz. The Azure Realtime service is fixed with it.
+
+- **A worker's children stop when its pipeline ends on its own.** A pipeline
+  ending through an `EndFrame` it queued, an idle timeout or a fatal error
+  left its child workers running, and the runner never returned. The worker
+  now cancels them as it finishes.
+
+- **A flush drains through a parallel pipeline.** `Flush` never finished on a
+  pipeline holding a `ParallelPipeline` or a `ServiceSwitcher`, which stalled
+  RTVI `send-text` with run-immediately. Each leg of the trip is now a new
+  `PipelineFlushFrame` sharing a new `FlushID`.
+
+- **Deepgram Flux and Cartesia Turns retry a connection the server never
+  confirms.** The dial now only opens the socket, and the first read waits up
+  to 10 seconds for the confirmation through the new
+  `wsservice.ReceiveUntilConfirmed`, so the wait no longer holds up the audio
+  path. A connection left unconfirmed is retried, and the receive loop gives up
+  after three in a row. Flux treated it as a rejected request and stopped on
+  the first one, and Cartesia Turns waited for it with no bound. Settings
+  Cartesia rejects, such as an unknown model, are reported once as a permanent
+  invalid-request error carrying Cartesia's message instead of being retried,
+  and an error on a confirmed Cartesia session is reported while the session
+  carries on.
 
 - **Uninterruptible speech survives an interruption in the TTS service.** A
   `TTSSpeakFrame` marked uninterruptible now gets its own audio context, even
