@@ -5,10 +5,13 @@ import (
 	"github.com/gojargo/jargo/provider/openai/chat"
 )
 
-// NewLLM builds a Perplexity LLM service. Perplexity speaks the OpenAI
-// chat-completions API, with two departures from it: it has no developer role,
-// and it is stricter than OpenAI about the shape of a conversation (which its
-// adapter settles).
+// NewLLM builds a service for Perplexity's Sonar chat completions API.
+// Perplexity speaks the OpenAI chat-completions API there, with two departures
+// from it: it has no developer role, and it is stricter than OpenAI about the
+// shape of a conversation (which its adapter settles).
+//
+// Deprecated: Perplexity has ended support for Sonar chat completions in favor
+// of its Agent API. Use NewAgentLLM instead.
 func NewLLM(cfg chat.LLMConfig) *chat.LLMService {
 	return chat.NewCompatLLM(chat.Compat{
 		Name:            "PerplexityLLM",

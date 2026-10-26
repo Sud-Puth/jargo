@@ -21,6 +21,9 @@ const (
 	// evtItemAdded announces an output item; a function call arrives this way,
 	// carrying the call id and the function name.
 	evtItemAdded = "response.output_item.added"
+	// evtItemDone completes an output item; a function call's carries its
+	// complete arguments.
+	evtItemDone = "response.output_item.done"
 	// evtArgsDelta is a chunk of a function call's arguments.
 	evtArgsDelta = "response.function_call_arguments.delta"
 	// evtArgsDone completes a function call's arguments.
@@ -59,6 +62,9 @@ type outputItem struct {
 	ID     string `json:"id"`
 	CallID string `json:"call_id"`
 	Name   string `json:"name"`
+	// Arguments is a function call's complete arguments, on the item that
+	// response.output_item.done completes.
+	Arguments string `json:"arguments"`
 }
 
 // responseObject is the response a lifecycle event reports on.
@@ -81,8 +87,24 @@ type usage struct {
 	OutputTokens       int64 `json:"output_tokens"`
 	TotalTokens        int64 `json:"total_tokens"`
 	InputTokensDetails *struct {
-		CachedTokens int64 `json:"cached_tokens"`
+		CachedTokens     int64 `json:"cached_tokens"`
+		CacheWriteTokens int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	// raw is the usage object as sent, for a server that reports fields this
+	// struct does not model.
+	raw json.RawMessage
+}
+
+// UnmarshalJSON decodes the usage and keeps it as sent.
+func (u *usage) UnmarshalJSON(data []byte) error {
+	type plain usage
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*u = usage(p)
+	u.raw = slices.Clone(data)
+	return nil
 }
 
 // tokenUsage converts the wire accounting into the framework's usage shape.
@@ -94,6 +116,9 @@ func (u usage) tokenUsage() frames.LLMTokenUsage {
 	}
 	if u.InputTokensDetails != nil {
 		out.CacheReadTokens = new(u.InputTokensDetails.CachedTokens)
+		if u.InputTokensDetails.CacheWriteTokens > 0 {
+			out.CacheCreationTokens = new(u.InputTokensDetails.CacheWriteTokens)
+		}
 	}
 	return out
 }
@@ -155,7 +180,7 @@ func (s *streamState) handle(ev event) (done bool, err error) {
 			s.sawText = true
 			return false, s.sink.Text(ev.Delta)
 		}
-	case evtItemAdded, evtArgsDelta, evtArgsDone:
+	case evtItemAdded, evtArgsDelta, evtArgsDone, evtItemDone:
 		s.trackCall(ev)
 	case evtCompleted, evtIncomplete:
 		s.finish(ev)
@@ -201,6 +226,12 @@ func (s *streamState) trackCall(ev event) {
 			// The done event carries the complete arguments, so it supersedes the
 			// fragments rather than appending to them.
 			call.args = ev.Arguments
+		}
+	case evtItemDone:
+		// The completed item carries the complete arguments too, which is where
+		// a call whose announcement was held back until now gets them.
+		if call, ok := s.calls[ev.OutputIndex]; ok && ev.Item != nil && ev.Item.Arguments != "" {
+			call.args = ev.Item.Arguments
 		}
 	}
 }

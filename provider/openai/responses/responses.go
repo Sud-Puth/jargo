@@ -234,41 +234,54 @@ func modelSupportsReasoning(model string) (reasons, known bool) {
 	return major >= 5 && !strings.Contains(model, "chat"), true
 }
 
-// thinkingReporter reports the thinking default a request was sent with. The
+// ThinkingReporter reports the thinking default a request was sent with. The
 // LLM base implements it.
-type thinkingReporter interface {
+type ThinkingReporter interface {
 	ReportThinkingDefault(model, setting string, canThink bool, provider, settings string)
 }
 
-// reasoningFor is the reasoning the request carries, or nil to leave the field
-// off it.
-//
-// A configured value is sent as it stands. Nothing configured sends the
-// model's entry in thinkingDefaults, its lowest effort, if it has one, for the
-// fastest responses; any other model runs at OpenAI's default. Reasoning set
-// through Extra wins over that default, so none is sent then. The first
-// request for each model reports the effort sent or, for a reasoning model
-// that is not listed, warns that it runs at OpenAI's default. report may be
-// nil, which reports nothing.
-func (c Config) reasoningFor(report thinkingReporter) *ReasoningConfig {
+// configuredReasoning is the reasoning the config asks for, or nil when it
+// asks for none. An empty config is the same as none.
+func (c Config) configuredReasoning() *ReasoningConfig {
 	if c.Reasoning != nil && *c.Reasoning != (ReasoningConfig{}) {
 		r := *c.Reasoning
 		return &r
 	}
-	if _, ok := c.Extra["reasoning"]; ok {
-		return nil
+	return nil
+}
+
+// applyThinkingDefault sends the model its lowest reasoning effort when no
+// reasoning is configured.
+//
+// It applies the model's entry in thinkingDefaults, if it has one, for the
+// fastest responses; any other model runs at OpenAI's default. A request that
+// already sets reasoning, from the config or from Extra, is left as it is. The
+// first request for each model reports the effort sent or, for a reasoning
+// model that is not listed, warns that it runs at OpenAI's default. report may
+// be nil, which reports nothing.
+func (c Config) applyThinkingDefault(req *request, report ThinkingReporter) {
+	if req.Reasoning != nil {
+		return
 	}
-	var r *ReasoningConfig
+	if _, ok := c.Extra["reasoning"]; ok {
+		return
+	}
 	var setting string
 	if effort, ok := thinkingDefaults[modelName(c.Model)]; ok {
-		r = &ReasoningConfig{Effort: effort}
+		req.Reasoning = &ReasoningConfig{Effort: effort}
 		setting = fmt.Sprintf(`reasoning={"effort":%q}`, effort)
 	}
 	if report != nil {
 		reasons, _ := modelSupportsReasoning(c.Model)
 		report.ReportThinkingDefault(c.Model, setting, reasons, "OpenAI", "Reasoning in responses.Config")
 	}
-	return r
+}
+
+// encode renders a request for the wire: the thinking default, then Extra
+// over the modeled fields.
+func (c Config) encode(req request, report ThinkingReporter) ([]byte, error) {
+	c.applyThinkingDefault(&req, report)
+	return encodeBody(req, c.Extra)
 }
 
 // warnIfReasoningUnsupported says so when a service is configured to reason on
@@ -321,7 +334,7 @@ type request struct {
 // newRequest builds the request for a conversation, without the streaming or
 // continuation fields the transports set themselves.
 func (c Config) newRequest(
-	convo *frames.LLMContext, opts adapter.Options, withTools bool, report thinkingReporter,
+	convo *frames.LLMContext, opts adapter.Options, withTools bool,
 ) (request, error) {
 	var a responsesadapter.Adapter
 	// The configured instructions are this service's own default, standing in
@@ -343,7 +356,7 @@ func (c Config) newRequest(
 		Temperature:     c.Temperature,
 		TopP:            c.TopP,
 		ServiceTier:     c.ServiceTier,
-		Reasoning:       c.reasoningFor(report),
+		Reasoning:       c.configuredReasoning(),
 	}
 	if withTools {
 		req.Tools = p.Tools
@@ -374,10 +387,10 @@ type textFormat struct {
 // the service has already checked it can enforce.
 func runInference(
 	ctx context.Context, cfg Config, client *http.Client,
-	convo *frames.LLMContext, opts llm.InferenceOptions, report thinkingReporter,
+	convo *frames.LLMContext, opts llm.InferenceOptions, encode func(request) ([]byte, error),
 ) (string, error) {
 	body, err := cfg.newRequest(
-		convo, adapter.Options{SystemInstruction: opts.SystemInstruction}, false, report,
+		convo, adapter.Options{SystemInstruction: opts.SystemInstruction}, false,
 	)
 	if err != nil {
 		return "", err
@@ -397,7 +410,7 @@ func runInference(
 		// of the conversation's own.
 		body.Instructions = opts.SystemInstruction
 	}
-	raw, err := encodeBody(body, cfg.Extra)
+	raw, err := encode(body)
 	if err != nil {
 		return "", err
 	}

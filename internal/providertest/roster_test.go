@@ -50,6 +50,7 @@ func TestDeveloperRoleRoster(t *testing.T) {
 		{"nebius", nebius.NewLLM, chat.RoleUser},
 		{"ollama", ollama.NewLLM, chat.RoleUser},
 		{"openrouter", openrouter.NewLLM, chat.RoleUser},
+		//nolint:staticcheck // the deprecated Sonar service is still shipped, so still tested
 		{"perplexity", perplexity.NewLLM, chat.RoleUser},
 		{"qwen", qwen.NewLLM, chat.RoleUser},
 		{"sambanova", sambanova.NewLLM, chat.RoleUser},

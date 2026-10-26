@@ -135,9 +135,8 @@ func (r *recorder) ReportThinkingDefault(model, setting string, canThink bool, _
 func TestTheDefaultIsReportedForEachRequest(t *testing.T) {
 	var r recorder
 	for _, model := range []string{"gpt-5-mini", "gpt-6.2", "gpt-4.1"} {
-		if _, err := (Config{Model: model}).newRequest(convo(), adapter.Options{}, false, &r); err != nil {
-			t.Fatal(err)
-		}
+		var req request
+		Config{Model: model}.applyThinkingDefault(&req, &r)
 	}
 	want := []string{`INFO gpt-5-mini reasoning={"effort":"minimal"}`, "WARN gpt-6.2", "NONE gpt-4.1"}
 	if !slices.Equal(r.lines, want) {
@@ -150,9 +149,11 @@ func TestTheDefaultIsReportedForEachRequest(t *testing.T) {
 func TestNothingIsReportedWhenReasoningIsConfigured(t *testing.T) {
 	var r recorder
 	cfg := Config{Model: "gpt-6.2", Reasoning: &ReasoningConfig{Effort: "low"}}
-	if _, err := cfg.newRequest(convo(), adapter.Options{}, false, &r); err != nil {
+	req, err := cfg.newRequest(convo(), adapter.Options{}, false)
+	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.applyThinkingDefault(&req, &r)
 	if len(r.lines) != 0 {
 		t.Errorf("reported %q, want nothing", r.lines)
 	}
