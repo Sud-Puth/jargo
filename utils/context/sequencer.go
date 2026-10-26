@@ -42,6 +42,10 @@ type streamingContext struct {
 	aggregator   *parallelSentenceAggregator
 	appendToCtx  bool
 	buildTracker bool
+	// textType is the text type of a promoted sentence: a sentence for streamed
+	// tokens, or the type the context's text was given with, such as a
+	// TTSSpeakFrame's.
+	textType frames.TextType
 }
 
 // AggregatedFrameSequencer orders the frames of a synthesis so the conversation
@@ -115,17 +119,22 @@ func (s *AggregatedFrameSequencer) registerSpokenLocked(
 	}
 	sc, ok := s.streaming[contextID]
 	if !ok {
+		textType := frame.TextType
+		if textType == frames.TextTypeToken {
+			textType = frames.TextTypeSentence
+		}
 		sc = &streamingContext{
 			aggregator:   newParallelSentenceAggregator(language),
 			appendToCtx:  appendToContext,
 			buildTracker: buildTracker,
+			textType:     textType,
 		}
 		s.streaming[contextID] = sc
 	}
 	sc.aggregator.setLanguage(language)
 	var out []frames.Frame
 	for _, agg := range sc.aggregator.aggregate(ttsText, rawOr(frame), frame.Text) {
-		out = append(out, s.promote(agg, contextID, sc.appendToCtx, sc.buildTracker)...)
+		out = append(out, s.promote(agg, contextID, sc)...)
 	}
 	return out
 }
@@ -166,7 +175,7 @@ func (s *AggregatedFrameSequencer) finalizeLocked(contextID string) []frames.Fra
 	if !ok {
 		return nil
 	}
-	return s.promote(agg, contextID, sc.appendToCtx, sc.buildTracker)
+	return s.promote(agg, contextID, sc)
 }
 
 // ProcessWord folds one word timing into the slot it belongs to and returns the
@@ -404,12 +413,13 @@ func (s *AggregatedFrameSequencer) appendSpokenSlot(
 // making it up has already been sent, so it completes at once and a
 // whole-sentence frame carries its text into the conversation.
 func (s *AggregatedFrameSequencer) promote(
-	agg parallelAggregation, contextID string, appendToContext, buildTracker bool,
+	agg parallelAggregation, contextID string, sc *streamingContext,
 ) []frames.Frame {
 	if trimSpace(agg.userFacing) == "" {
 		return nil
 	}
-	frame := frames.NewAggregatedTextFrame(agg.userFacing, frames.TextTypeSentence)
+	appendToContext, buildTracker := sc.appendToCtx, sc.buildTracker
+	frame := frames.NewAggregatedTextFrame(agg.userFacing, sc.textType)
 	frame.RawText = agg.llm
 	frame.ContextID = contextID
 	frame.WillBeSpoken = true
@@ -425,7 +435,7 @@ func (s *AggregatedFrameSequencer) promote(
 	if !buildTracker {
 		// No timings are coming, so the whole unit is spoken at once: the frame
 		// stands for the sentence rather than a word within it.
-		wordFrame := frames.NewTTSTextFrame(agg.userFacing, frames.TextTypeSentence)
+		wordFrame := frames.NewTTSTextFrame(agg.userFacing, sc.textType)
 		wordFrame.SegmentID = frame.ID()
 		wordFrame.RawText = agg.llm
 		wordFrame.ContextID = contextID
