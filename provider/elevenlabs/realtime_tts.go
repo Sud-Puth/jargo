@@ -294,6 +294,11 @@ func (s *realtimeSynthesizer) drop(cause error) {
 		delete(s.states, id)
 	}
 	s.active = ""
+	// The contexts open on the dropped connection never get the rest of their
+	// audio, and the next connection has never seen the turn's context.
+	if s.host != nil {
+		s.host.ReplaceConnection()
+	}
 }
 
 // write sends one JSON message, serialized against the other writers.

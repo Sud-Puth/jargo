@@ -181,6 +181,8 @@ func (h *ttsHost) AudioContextAvailable(string) bool {
 	return !h.closed
 }
 
+func (h *ttsHost) ReplaceConnection() {}
+
 // spokenWords is the timings reported so far.
 func (h *ttsHost) spokenWords() []uctx.WordTiming {
 	h.mu.Lock()

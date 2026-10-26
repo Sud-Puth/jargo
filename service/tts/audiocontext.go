@@ -47,6 +47,10 @@ type AudioContextHost interface {
 	// RotateTurnContext closes the turn's context out and opens a fresh one for
 	// the sentences still to come. See Base.RotateTurnContext.
 	RotateTurnContext(ctx context.Context)
+	// ReplaceConnection closes every open context and moves a turn in progress
+	// to a new context ID, for a provider replacing its connection. See
+	// Base.ReplaceConnection.
+	ReplaceConnection()
 }
 
 // ContextSynthesizer is an optional interface a Synthesizer implements when its
@@ -737,6 +741,27 @@ func (b *Base) RemoveAudioContext(contextID string) {
 // AudioContextAvailable reports whether the context is still open.
 func (b *Base) AudioContextAvailable(contextID string) bool {
 	return b.audioContextFor(contextID) != nil
+}
+
+// ReplaceConnection closes every open audio context, and moves a turn in
+// progress to a new context ID, for a provider replacing its connection.
+//
+// A provider keeps its context state per connection and does not resume it on a
+// new one, so audio still due on the old connection never arrives. Every open
+// context is closed (the audio already received still plays), and the rest of a
+// turn in progress opens a fresh context with the provider, rather than reusing
+// an ID the new connection has never seen, which a provider may drop without an
+// error or speak without the settings it was opened with. A provider holding
+// one connection across requests calls it before it dials a replacement.
+func (b *Base) ReplaceConnection() {
+	for _, id := range b.openAudioContexts() {
+		b.RemoveAudioContext(id)
+	}
+	b.audioCtxMu.Lock()
+	if b.turnContext != "" {
+		b.turnContext = uuid.NewString()
+	}
+	b.audioCtxMu.Unlock()
 }
 
 // RotateTurnContext closes the turn's context out and opens a fresh one for the

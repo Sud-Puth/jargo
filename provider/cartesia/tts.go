@@ -265,6 +265,11 @@ func (s *synthesizer) readLoop(ctx context.Context) {
 		}
 
 		slog.Debug("cartesia tts connection was disconnected (timeout?), reconnecting")
+		// The contexts open on the dropped connection never get the rest of
+		// their audio, and the new one has never seen the turn's context.
+		if s.host != nil {
+			s.host.ReplaceConnection()
+		}
 		s.mu.Lock()
 		if s.conn == conn {
 			s.conn = nil

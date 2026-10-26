@@ -360,6 +360,8 @@ func (h *fakeHost) RemoveAudioContext(string) {
 
 func (h *fakeHost) AudioContextAvailable(string) bool { return !h.closed }
 
+func (h *fakeHost) ReplaceConnection() {}
+
 func (h *fakeHost) snapshot() ([]byte, []string, []string, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
