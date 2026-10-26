@@ -2,6 +2,7 @@ package pipeline_test
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,29 @@ func (e *erroring) ProcessFrame(ctx context.Context, f frames.Frame, dir process
 	return e.PushFrame(ctx, f, dir)
 }
 
+// permanentlyFailing reports an error every time it sees a text frame, as one
+// that keeps recurring whatever its category says.
+type permanentlyFailing struct {
+	*processor.Base
+}
+
+func newPermanentlyFailing() *permanentlyFailing {
+	p := &permanentlyFailing{}
+	p.Base = processor.New("PermanentlyFailing", p)
+	return p
+}
+
+func (p *permanentlyFailing) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.Direction) error {
+	if err := p.Base.ProcessFrame(ctx, f, dir); err != nil {
+		return err
+	}
+	if _, ok := f.(*frames.TextFrame); ok {
+		p.PushError(ctx, "service failed for good", nil, false,
+			processor.WithErrorCategory(errs.Server), processor.ForceTreatAsPermanent())
+	}
+	return p.PushFrame(ctx, f, dir)
+}
+
 // unusableRun runs a one-processor pipeline under a policy and reports the
 // errors that cost their processor its usefulness alongside the frames that
 // ended the run.
@@ -65,17 +89,7 @@ func unusableRun(
 		finished = append(finished, f)
 	})
 
-	for _, f := range feed {
-		worker.QueueFrame(f)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- worker.Run(context.Background()) }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the worker never finished")
-	}
+	runPastErrors(t, worker, feed, countText(feed))
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -162,42 +176,110 @@ func TestUnclassifiedErrorsLeaveThePipelineRunning(t *testing.T) {
 	}
 }
 
+func TestPermanentErrorsAreActedOnWhateverTheCategory(t *testing.T) {
+	unusable, finished := unusableRun(t, newPermanentlyFailing(),
+		pipeline.UnusableCancel, []frames.Frame{frames.NewTextFrame("hello")})
+
+	if len(unusable) != 1 {
+		t.Fatalf("reported %d unusable errors, want 1", len(unusable))
+	}
+	if !hasFrame[*frames.CancelFrame](finished) {
+		t.Errorf("finished with %v, want a CancelFrame", finished)
+	}
+}
+
 func TestAProcessorIsActedOnOnce(t *testing.T) {
-	// Every error is reported, but the policy answers the first. Under the
-	// cancel policy a second answer would cancel a run already ending.
 	p := newErroring("Erroring", errs.Authentication)
-	unusable, finished := unusableRun(t, p, pipeline.UnusableContinue, []frames.Frame{
+	worker := runActedOn(t, []frames.Frame{
 		frames.NewTextFrame("one"), frames.NewTextFrame("two"),
 		frames.NewTextFrame("three"), frames.NewEndFrame(),
-	})
+	}, p)
 
-	if len(unusable) != 3 {
-		t.Errorf("reported %d unusable errors, want 3", len(unusable))
-	}
-	if !hasFrame[*frames.EndFrame](finished) {
-		t.Errorf("finished with %v, want an EndFrame", finished)
+	// Every error is reported, but the policy is applied to the first.
+	if got, want := worker.UnusableProcessors(), []uint64{p.ID()}; !slices.Equal(got, want) {
+		t.Errorf("acted on %v, want %v", got, want)
 	}
 }
 
 func TestEachProcessorIsActedOnSeparately(t *testing.T) {
 	first := newErroring("First", errs.Authentication)
 	second := newErroring("Second", errs.Authentication)
-	worker := pipeline.NewWorker(pipeline.New(first, second), pipeline.WorkerConfig{
+	worker := runActedOn(t, []frames.Frame{frames.NewTextFrame("hello"), frames.NewEndFrame()}, first, second)
+
+	// The text frame reaches both processors, so both report an error.
+	want := []uint64{first.ID(), second.ID()}
+	slices.Sort(want)
+	if got := worker.UnusableProcessors(); !slices.Equal(got, want) {
+		t.Errorf("acted on %v, want %v", got, want)
+	}
+}
+
+// runActedOn runs the processors under the continue policy over feed, in which
+// every text frame makes every processor report an error, and returns the worker
+// once it has finished.
+func runActedOn(t *testing.T, feed []frames.Frame, ps ...processor.Processor) *pipeline.Worker {
+	t.Helper()
+	worker := pipeline.NewWorker(pipeline.New(ps...), pipeline.WorkerConfig{
 		ProcessorUnusablePolicy: pipeline.UnusableContinue,
 	})
+	runPastErrors(t, worker, feed, countText(feed)*len(ps))
+	return worker
+}
 
-	worker.QueueFrame(frames.NewTextFrame("hello"))
-	worker.QueueFrame(frames.NewEndFrame())
+// runPastErrors runs worker over feed and waits for it to finish.
+//
+// A trailing EndFrame is held back until the worker has heard of errors errors.
+// An error travels back up the pipeline while the frame that caused it carries on
+// down, and the EndFrame behind it can reach the end and finish the run before
+// the error reaches the start. Holding it back keeps a test about the errors
+// from depending on which of the two gets there first.
+func runPastErrors(t *testing.T, worker *pipeline.Worker, feed []frames.Frame, errors int) {
+	t.Helper()
+	reported := make(chan struct{}, errors)
+	events.On(&worker.Registry, pipeline.EventPipelineError, func(context.Context, *frames.ErrorFrame) {
+		select {
+		case reported <- struct{}{}:
+		default:
+		}
+	})
+
 	done := make(chan error, 1)
 	go func() { done <- worker.Run(context.Background()) }()
+
+	var end frames.Frame
+	if n := len(feed); n > 0 {
+		if _, ok := feed[n-1].(*frames.EndFrame); ok {
+			feed, end = feed[:n-1], feed[n-1]
+		}
+	}
+	for _, f := range feed {
+		worker.QueueFrame(f)
+	}
+	if end != nil {
+		for range errors {
+			select {
+			case <-reported:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the errors never reached the worker")
+			}
+		}
+		worker.QueueFrame(end)
+	}
+
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the worker never finished")
 	}
+}
 
-	// The text frame reaches both processors, so both report an error.
-	if first.Usable() || second.Usable() {
-		t.Errorf("usability: first %t, second %t, want both unusable", first.Usable(), second.Usable())
+// countText is the number of text frames in feed.
+func countText(feed []frames.Frame) int {
+	n := 0
+	for _, f := range feed {
+		if _, ok := f.(*frames.TextFrame); ok {
+			n++
+		}
 	}
+	return n
 }
