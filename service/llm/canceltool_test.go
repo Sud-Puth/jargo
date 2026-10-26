@@ -505,3 +505,39 @@ func TestCancelFunctionCallsStopsEveryCallInFlight(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltInToolsAreSentAloneWhenThereAreNoOthers checks a tool the service
+// implements itself reaches the model, and is answered, when the conversation
+// advertises no tools of its own.
+func TestBuiltInToolsAreSentAloneWhenThereAreNoOthers(t *testing.T) {
+	gen := &scriptedGen{turns: [][]frames.ToolCall{{
+		{ID: "call-1", Name: "delegate", Args: json.RawMessage(`{}`)},
+	}}}
+	svc := llm.New("FakeLLM", gen)
+	gen.adapter.SetBuiltin(adapter.Builtin{Tool: frames.Tool{
+		Name: "delegate", Description: "hand the work over", Parameters: json.RawMessage(`{"type":"object"}`),
+	}})
+	called := make(chan struct{}, 1)
+	svc.RegisterFunction("delegate", func(context.Context, llm.FunctionCallParams) error {
+		called <- struct{}{}
+		return nil
+	})
+
+	task := pipeline.NewWorker(pipeline.New(svc), pipeline.WorkerConfig{})
+	runDone := make(chan error, 1)
+	go func() { runDone <- task.Run(context.Background()) }()
+	defer func() {
+		task.Cancel(context.Background(), "")
+		<-runDone
+	}()
+
+	convo := frames.NewLLMContext("be brief")
+	convo.AddUserMessage("go on then")
+	task.QueueFrame(frames.NewLLMContextFrame(convo))
+
+	select {
+	case <-called:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the built-in tool was never called")
+	}
+}

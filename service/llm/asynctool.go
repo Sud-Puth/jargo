@@ -288,6 +288,23 @@ type AdapterHolder interface {
 	LLMAdapter() BuiltinToolHolder
 }
 
+// builtinLister is implemented by an adapter that can say which tools the service
+// implements itself. adapter.Base satisfies it, so every jargo adapter does.
+type builtinLister interface {
+	WithBuiltins(frames.ToolsSchema) frames.ToolsSchema
+}
+
+// hasBuiltinTools reports whether the adapter this service converts through
+// carries any tool the service implements itself.
+func (b *Base) hasBuiltinTools() bool {
+	holder, ok := b.gen.(AdapterHolder)
+	if !ok {
+		return false
+	}
+	lister, ok := holder.LLMAdapter().(builtinLister)
+	return ok && len(lister.WithBuiltins(frames.ToolsSchema{}).Standard) > 0
+}
+
 // applyCancelTools brings the tools this service sends into line with the cancel
 // tools registered. They belong to the service rather than to the conversation,
 // so they come and go with what is registered instead of being written into a

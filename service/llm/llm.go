@@ -1330,7 +1330,7 @@ func (b *Base) ServiceMetadataFrame() frames.ServiceMetadata {
 }
 
 // run streams a response for the conversation, choosing the tool loop when the
-// context carries tools and the generator supports them. It runs under the
+// context or the service carries tools and the generator supports them. It runs under the
 // process goroutine's context, so an interruption cancels the in-flight work.
 func (b *Base) run(ctx context.Context, convo *frames.LLMContext) error {
 	// The conversation carries its current toolset on every inference, so this is
@@ -1339,7 +1339,9 @@ func (b *Base) run(ctx context.Context, convo *frames.LLMContext) error {
 	// settle what this service adds on its own account.
 	b.SyncToolHandlers(ctx, convo.Tools())
 	b.syncCancelTools()
-	if len(convo.Tools()) > 0 {
+	// The tools this service implements itself go out on every request, so they
+	// are the toolset when the conversation advertises none of its own.
+	if len(convo.Tools()) > 0 || b.hasBuiltinTools() {
 		if tg, ok := b.gen.(ToolGenerator); ok {
 			return b.runWithTools(ctx, convo, tg)
 		}
