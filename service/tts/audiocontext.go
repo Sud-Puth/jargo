@@ -1001,6 +1001,7 @@ func (b *Base) audioContextLoop(ctx context.Context) {
 			c.OnAudioContextCompleted(ctx, it.contextID)
 		}
 		b.setPlayingContextID("")
+		b.releaseFramesIfAudioContextsEnded()
 	}
 }
 

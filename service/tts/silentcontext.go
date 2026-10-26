@@ -60,17 +60,6 @@ func (b *Base) recordContextAudioOutcome(ctx context.Context, contextID string, 
 		return
 	}
 
-	// This context played nothing, so nothing will report the bot falling silent
-	// to lift a pause taken for it, which happens when the pause was taken while
-	// the context was still open. A bot still speaking is playing audio from
-	// another context, whose own stopped frame is still to come.
-	b.pauseStateMu.Lock()
-	speaking := b.botSpeaking
-	b.pauseStateMu.Unlock()
-	if !speaking {
-		b.maybeResumeFrameProcessing()
-	}
-
 	// An unusable service is deliberately not given work, so its silent contexts
 	// say nothing new.
 	if !b.Usable() {

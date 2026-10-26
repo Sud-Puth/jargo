@@ -7,18 +7,17 @@ import (
 // PauseOptions configures pausing the service's frame handling while the audio
 // for a turn is generated. It is off unless asked for.
 type PauseOptions struct {
-	// Enabled pauses frame handling once the text of a turn has been sent to
-	// the provider, until the audio for it has finished playing. It stops the
-	// next turn's text being synthesized over the audio for this one. Frames
-	// stay queued, in order, while the service is paused.
+	// Enabled holds incoming frames after a reply until every audio context
+	// open for it has ended. Services whose audio does not carry its request's
+	// context ID need it: it stops the next request's audio being taken for
+	// this one's. Frames stay queued, in order, while the service is paused.
 	Enabled bool
 
 	// WatchdogTimeout is unused.
 	//
-	// Deprecated: it has no replacement. Frame handling is paused only while
-	// there is audio still to be played, so the pause is lifted by the bot
-	// falling silent or by the audio context completing with nothing in it, and
-	// no timer is needed to break it.
+	// Deprecated: it has no replacement. Frame handling is paused only while an
+	// audio context is open, and every context ends, so no timer is needed to
+	// break the pause.
 	WatchdogTimeout time.Duration
 }
 
@@ -30,61 +29,31 @@ func (b *Base) SetPauseFrameProcessing(o PauseOptions) {
 	b.pauseStateMu.Unlock()
 }
 
-// maybePauseFrameProcessing holds incoming frames until the audio for this turn
-// has played.
+// holdFramesWhileAudioContextsOpen holds incoming frames while an audio context
+// is open.
 //
-// The pause waits for the bot to stop speaking, so it is only taken while there
-// is playback to wait for: the bot speaking, or an audio context still open that
-// may yet produce audio. A turn with neither, one whose contexts all completed in
-// silence or whose playback finished before its text ran out, has nothing left to
-// resume it, and pausing would hold frame handling for good.
-//
-// Nothing was sent for a turn that was only a function call, so there is no audio
-// to wait for there either.
-func (b *Base) maybePauseFrameProcessing() {
-	b.pauseStateMu.Lock()
-	enabled, processing, speaking := b.pauseOpts.Enabled, b.processingText, b.botSpeaking
-	b.pauseStateMu.Unlock()
-
-	if !processing || !enabled {
-		return
-	}
-	// With no audio playing and none on its way, nothing will report the bot
-	// falling silent, so the pause would never be lifted.
-	if !speaking && !b.hasOpenAudioContexts() {
-		return
-	}
-	b.PauseProcessingFrames()
-}
-
-// maybeResumeFrameProcessing releases frame handling paused for a turn's audio.
-func (b *Base) maybeResumeFrameProcessing() {
+// Pausing is for services whose audio does not carry its request's context ID:
+// they label incoming audio with the context still open, so the next request
+// waits for every open context to end. Contexts play in order, so audio from
+// different requests never overlaps. A context ends once its audio has all
+// arrived, or once it has gone the stop-frame timeout without audio for a
+// provider that never ends it, so the frames held are always released.
+func (b *Base) holdFramesWhileAudioContextsOpen() {
 	b.pauseStateMu.Lock()
 	enabled := b.pauseOpts.Enabled
 	b.pauseStateMu.Unlock()
-	if enabled {
-		b.ResumeProcessingFrames()
+	if enabled && b.hasOpenAudioContexts() {
+		b.PauseProcessingFrames()
 	}
 }
 
-// setProcessingText records whether text for this turn was sent to the provider,
-// which is what decides there is audio worth pausing for.
-func (b *Base) setProcessingText(v bool) {
+// releaseFramesIfAudioContextsEnded lets held frames through once no audio
+// context is open.
+func (b *Base) releaseFramesIfAudioContextsEnded() {
 	b.pauseStateMu.Lock()
-	b.processingText = v
+	enabled := b.pauseOpts.Enabled
 	b.pauseStateMu.Unlock()
-}
-
-// isProcessingText reports whether text for this turn was sent to the provider.
-func (b *Base) isProcessingText() bool {
-	b.pauseStateMu.Lock()
-	defer b.pauseStateMu.Unlock()
-	return b.processingText
-}
-
-// setBotSpeaking records whether the bot's audio is confirmed playing.
-func (b *Base) setBotSpeaking(v bool) {
-	b.pauseStateMu.Lock()
-	b.botSpeaking = v
-	b.pauseStateMu.Unlock()
+	if enabled && !b.hasOpenAudioContexts() {
+		b.ResumeProcessingFrames()
+	}
 }

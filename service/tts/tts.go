@@ -294,12 +294,6 @@ type Base struct {
 	outMu       sync.Mutex
 	silence     SilenceOptions
 	destination string
-	// processingText records that text for this turn reached the provider, so
-	// there is audio worth waiting for.
-	processingText bool
-	// botSpeaking records that the audio is confirmed playing, which is one of
-	// the two things that say a pause has something to wait for.
-	botSpeaking bool
 
 	// Contexts that complete with no audio at all. See silentcontext.go.
 	silentMu sync.Mutex
@@ -641,8 +635,6 @@ func (b *Base) ProcessFrame(ctx context.Context, f frames.Frame, dir processor.D
 		return b.handleStart(ctx, f, dir)
 	case *frames.TTSUpdateSettingsFrame:
 		return b.handleSettingsUpdate(ctx, fr, dir)
-	case *frames.BotStartedSpeakingFrame, *frames.BotStoppedSpeakingFrame:
-		return b.handleBotSpeaking(ctx, f, dir)
 	default:
 		return b.queueSerial(ctx, f, dir)
 	}
@@ -800,10 +792,7 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	// still pending in the sequencer, waiting on a boundary that is not coming.
 	// It is promoted now, or its words would never be spoken into the context.
 	b.pushSequencerFrames(ctx, b.sequencer.Finalize(b.turnContextID()), b.turnContextID())
-	// Pause before the flag is cleared: a turn that sent no text, a function
-	// call and nothing else, has no audio to wait for.
-	b.maybePauseFrameProcessing()
-	b.setProcessingText(false)
+	b.holdFramesWhileAudioContextsOpen()
 	// The turn's context is done, so the whitespace opening the next one is its
 	// own to drop again.
 	b.setSentNonWhitespace(false)
@@ -814,18 +803,6 @@ func (b *Base) handleTurnEnd(ctx context.Context, f frames.Frame, dir processor.
 	b.setLLMResponding(false)
 	// Queued behind the audio contexts, so the end follows the response's audio
 	// and text. It goes out whether or not the response produced any speech.
-	return b.queueSerial(ctx, f, dir)
-}
-
-// handleBotSpeaking tracks whether the bot's audio is playing, which is what
-// releases a service paused waiting for it.
-func (b *Base) handleBotSpeaking(ctx context.Context, f frames.Frame, dir processor.Direction) error {
-	if _, started := f.(*frames.BotStartedSpeakingFrame); started {
-		b.setBotSpeaking(true)
-		return b.queueSerial(ctx, f, dir)
-	}
-	b.setBotSpeaking(false)
-	b.maybeResumeFrameProcessing()
 	return b.queueSerial(ctx, f, dir)
 }
 
@@ -915,9 +892,7 @@ func (b *Base) onTurnContextCompleted(ctx context.Context) {
 // longer wanted, and the provider is told so it stops generating into contexts
 // nobody is listening to.
 func (b *Base) handleInterruption(ctx context.Context) {
-	b.setProcessingText(false)
 	b.setSentNonWhitespace(false)
-	b.setBotSpeaking(false)
 	b.setLLMResponding(false)
 	if b.aggregator != nil {
 		b.aggregator.HandleInterruption()
@@ -932,11 +907,11 @@ func (b *Base) handleInterruption(ctx context.Context) {
 	// on, and the drain goroutine is restarted only if it was stopped.
 	b.interruptAudioContexts(ctx)
 	b.createAudioContextTask(ctx)
-	// The frame goroutine may be paused here: an interruption arriving while an
-	// uninterruptible frame was being handled flushes the queue but leaves the
-	// goroutine in place, and no BotStoppedSpeakingFrame is coming for audio that
-	// was never played. Resume, or the service stays paused for good.
-	b.maybeResumeFrameProcessing()
+	// Uninterruptible speech still open holds frames, even when the reply it was
+	// part of never ended to hold them. The contexts dropped never end on their
+	// own, so frames held for them are released here.
+	b.holdFramesWhileAudioContextsOpen()
+	b.releaseFramesIfAudioContextsEnded()
 }
 
 // handleSpeak speaks fixed text immediately, bypassing sentence aggregation.
@@ -959,7 +934,6 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	// its own that is opened and closed around it. Whether a turn was mid-flight
 	// is saved and put back, so speaking this does not look like the end of one.
 	saved := b.turnContextID()
-	savedProcessing := b.isProcessingText()
 	// The utterance opens a context of its own, so its leading whitespace is its
 	// own to drop; whatever the interrupted turn had sent is put back after.
 	savedSentNonWhitespace := b.sentNonWhitespace()
@@ -995,11 +969,12 @@ func (b *Base) handleSpeak(ctx context.Context, fr *frames.TTSSpeakFrame, _ proc
 	if !b.AudioContextAvailable(speakContextID) {
 		b.deleteTTSContext(speakContextID)
 	}
-	// Text went to the provider, so pause for the audio it will produce.
-	b.maybePauseFrameProcessing()
 	b.setTurnContextID(saved)
-	b.setProcessingText(savedProcessing)
 	b.setSentNonWhitespace(savedSentNonWhitespace)
+	// Inside an LLM turn, the end of the turn holds the next frames.
+	if saved == "" {
+		b.holdFramesWhileAudioContextsOpen()
+	}
 	return nil
 }
 
@@ -1252,12 +1227,6 @@ func (b *Base) pushTTSFrames(ctx context.Context, agg ttstext.Aggregation, inter
 	if !b.keepsFilteredText(filtered, streaming) {
 		return nil
 	}
-	// Text is on its way to the provider, so there is audio to wait for at the
-	// end of the turn. Set after the filters: a filter that strips the text to
-	// nothing would otherwise leave the flag latched and, with pausing enabled,
-	// pause the service waiting for audio that never comes.
-	b.setProcessingText(true)
-
 	aggregated := b.aggregatedFrame(agg, contextID)
 	aggregated.WillBeSpoken = true
 	// It is going to be spoken, so it does not go into the conversation here: the

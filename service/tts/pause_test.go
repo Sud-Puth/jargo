@@ -20,22 +20,60 @@ type pauseHarness struct {
 
 	mu    sync.Mutex
 	texts []string
-	errs  []*frames.ErrorFrame
 
 	runDone chan error
 }
 
+// gatedSynth answers on its own receive loop, the way a WebSocket provider
+// does, and holds each context's audio until the test opens the gate, so the
+// context stays open until then.
+type gatedSynth struct {
+	mu   sync.Mutex
+	host tts.AudioContextHost
+	gate chan struct{}
+	wg   sync.WaitGroup
+}
+
+func (s *gatedSynth) SampleRate() int { return 24000 }
+
+func (s *gatedSynth) SetAudioContextHost(h tts.AudioContextHost) {
+	s.mu.Lock()
+	s.host = h
+	s.mu.Unlock()
+}
+
+func (s *gatedSynth) RunTTS(_ context.Context, _, contextID string, _ func(frames.Frame) error) error {
+	s.mu.Lock()
+	host := s.host
+	s.mu.Unlock()
+	s.wg.Go(func() {
+		<-s.gate
+		host.AppendToAudioContext(contextID, frames.NewTTSAudioRawFrame(make([]byte, 480), 24000, 1))
+		host.AppendToAudioContext(contextID, frames.NewTTSStoppedFrame())
+		host.RemoveAudioContext(contextID)
+	})
+	return nil
+}
+
 func newPauseHarness(t *testing.T, opts tts.PauseOptions) *pauseHarness {
 	t.Helper()
+	syn := &gatedSynth{gate: make(chan struct{})}
+	h := newPauseHarnessWith(t, opts, syn)
+	// Registered after the harness's own cleanup, so it runs first and the
+	// audio still held is let go before the task is stopped.
+	t.Cleanup(func() { close(syn.gate) })
+	return h
+}
 
-	syn := &fakeSynth{rate: 24000, chunk: []byte{1, 2, 3, 4}, spoken: make(chan string, 8)}
+func newPauseHarnessWith(t *testing.T, opts tts.PauseOptions, syn tts.Synthesizer) *pauseHarness {
+	t.Helper()
+
 	base := tts.New("PauseTTS", syn)
 	base.SetPauseFrameProcessing(opts)
 
 	h := &pauseHarness{base: base, runDone: make(chan error, 1)}
 	h.task = pipeline.NewWorker(pipeline.New(base), pipeline.WorkerConfig{
 		ReachedDownstreamFilter: pipeline.AnyFrame,
-		ReachedUpstreamFilter:   pipeline.AnyFrame,
 	})
 	events.On(&h.task.Registry, pipeline.EventFrameReachedDownstream, func(_ context.Context, f frames.Frame) {
 		if tf, ok := f.(*frames.AggregatedTextFrame); ok {
@@ -44,19 +82,6 @@ func newPauseHarness(t *testing.T, opts tts.PauseOptions) *pauseHarness {
 			h.mu.Unlock()
 		}
 	})
-	events.On(&h.task.Registry, pipeline.EventFrameReachedUpstream, func(_ context.Context, f frames.Frame) {
-		if ef, ok := f.(*frames.ErrorFrame); ok {
-			h.mu.Lock()
-			h.errs = append(h.errs, ef)
-			h.mu.Unlock()
-		}
-	})
-
-	// Drain what the fake synthesizer reports so it never blocks.
-	go func() {
-		for range syn.spoken {
-		}
-	}()
 
 	go func() { h.runDone <- h.task.Run(context.Background()) }()
 	t.Cleanup(func() {
@@ -84,12 +109,6 @@ func (h *pauseHarness) spoke() []string {
 	return append([]string(nil), h.texts...)
 }
 
-func (h *pauseHarness) errors() []*frames.ErrorFrame {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]*frames.ErrorFrame(nil), h.errs...)
-}
-
 // waitForSpoken waits until n texts have been announced.
 func (h *pauseHarness) waitForSpoken(t *testing.T, n int, within time.Duration) []string {
 	t.Helper()
@@ -106,23 +125,28 @@ func (h *pauseHarness) waitForSpoken(t *testing.T, n int, within time.Duration) 
 	}
 }
 
-func TestPauseHoldsTheNextTurnUntilTheAudioFinishes(t *testing.T) {
-	h := newPauseHarness(t, tts.PauseOptions{Enabled: true})
+// TestPauseHoldsTheNextTurnUntilTheAudioContextEnds covers what pausing is for:
+// a provider whose audio does not carry its request's context ID labels it with
+// the context still open, so the next request waits for every open context to
+// end, rather than for the bot to stop speaking.
+func TestPauseHoldsTheNextTurnUntilTheAudioContextEnds(t *testing.T) {
+	syn := &gatedSynth{gate: make(chan struct{})}
+	h := newPauseHarnessWith(t, tts.PauseOptions{Enabled: true}, syn)
 
 	h.speakTurn("First one.")
 	if got := h.waitForSpoken(t, 1, 2*time.Second); len(got) != 1 {
 		t.Fatalf("first turn was not spoken: %v", got)
 	}
 
-	// The service is paused now, waiting for the audio to play out.
+	// The first turn's context is still open, waiting on its audio.
 	h.speakTurn("Second one.")
 	if got := h.waitForSpoken(t, 2, 500*time.Millisecond); len(got) != 1 {
-		t.Fatalf("second turn was synthesized while paused: %v", got)
+		t.Fatalf("second turn was synthesized while a context was open: %v", got)
 	}
 
-	// Playback finished: the held turn is released, in order.
-	h.task.QueueFrame(frames.NewBotStartedSpeakingFrame())
-	h.task.QueueFrame(frames.NewBotStoppedSpeakingFrame())
+	// The audio arrives and the context ends: the held turn is released, in
+	// order, with no bot-speaking frame involved.
+	close(syn.gate)
 
 	got := h.waitForSpoken(t, 2, 3*time.Second)
 	if len(got) != 2 {
@@ -133,8 +157,33 @@ func TestPauseHoldsTheNextTurnUntilTheAudioFinishes(t *testing.T) {
 	}
 }
 
+// TestPauseHoldsTheNextFramesAfterAStandaloneSpeak covers a TTSSpeakFrame
+// outside an LLM turn, which holds the frames after it the way the end of a
+// reply does.
+func TestPauseHoldsTheNextFramesAfterAStandaloneSpeak(t *testing.T) {
+	syn := &gatedSynth{gate: make(chan struct{})}
+	h := newPauseHarnessWith(t, tts.PauseOptions{Enabled: true}, syn)
+
+	h.task.QueueFrame(frames.NewTTSSpeakFrame("Hello there."))
+	if got := h.waitForSpoken(t, 1, 2*time.Second); len(got) != 1 {
+		t.Fatalf("the speak frame was not spoken: %v", got)
+	}
+	h.speakTurn("Next one.")
+	if got := h.waitForSpoken(t, 2, 500*time.Millisecond); len(got) != 1 {
+		t.Fatalf("the next turn ran while the speak frame's context was open: %v", got)
+	}
+
+	close(syn.gate)
+	if got := h.waitForSpoken(t, 2, 3*time.Second); len(got) != 2 {
+		t.Fatalf("held turn was never released: %v", got)
+	}
+}
+
 func TestPauseDisabledByDefault(t *testing.T) {
-	h := newPauseHarness(t, tts.PauseOptions{})
+	// The audio arrives at once, so only a pause could hold the second turn.
+	syn := &gatedSynth{gate: make(chan struct{})}
+	close(syn.gate)
+	h := newPauseHarnessWith(t, tts.PauseOptions{}, syn)
 
 	h.speakTurn("First one.")
 	h.speakTurn("Second one.")
@@ -160,32 +209,6 @@ func TestPauseSkippedWhenTheTurnSentNoText(t *testing.T) {
 	}
 }
 
-// TestPauseWaitsWhileTheBotIsSpeaking covers the usual case for a streaming
-// provider: playback for this turn started while the model was still generating,
-// so the pause has the bot falling silent to wait for.
-func TestPauseWaitsWhileTheBotIsSpeaking(t *testing.T) {
-	h := newPauseHarness(t, tts.PauseOptions{Enabled: true})
-
-	h.task.QueueFrame(frames.NewBotStartedSpeakingFrame())
-	h.speakTurn("First one.")
-	if got := h.waitForSpoken(t, 1, 2*time.Second); len(got) != 1 {
-		t.Fatalf("first turn was not spoken: %v", got)
-	}
-
-	h.speakTurn("Second one.")
-	if got := h.waitForSpoken(t, 2, 1*time.Second); len(got) != 1 {
-		t.Fatalf("second turn ran while the bot was still speaking: %v", got)
-	}
-	if errs := h.errors(); len(errs) != 0 {
-		t.Errorf("the pause reported an error: %v", errs[0].Error)
-	}
-
-	h.task.QueueFrame(frames.NewBotStoppedSpeakingFrame())
-	if got := h.waitForSpoken(t, 2, 3*time.Second); len(got) != 2 {
-		t.Fatalf("held turn was never released: %v", got)
-	}
-}
-
 func TestInterruptionReleasesAPausedService(t *testing.T) {
 	h := newPauseHarness(t, tts.PauseOptions{Enabled: true})
 
@@ -194,8 +217,8 @@ func TestInterruptionReleasesAPausedService(t *testing.T) {
 		t.Fatalf("first turn was not spoken: %v", got)
 	}
 
-	// No BotStoppedSpeakingFrame is coming for audio the interruption cut off,
-	// so the interruption itself has to release the service.
+	// The interruption drops the open context, which never ends on its own, so
+	// the interruption itself has to release the service.
 	h.task.QueueFrame(frames.NewInterruptionFrame())
 	h.speakTurn("After the barge-in.")
 
