@@ -1174,6 +1174,7 @@ func (t *Worker) Run(ctx context.Context) error {
 		t.Registry.Cleanup(context.Background())
 		t.observerProxy.stop()
 		t.turnTrace.EndConversation()
+		t.cancelChildren(pipeCtx)
 		t.mu.Lock()
 		t.finished = true
 		t.mu.Unlock()
@@ -1217,10 +1218,22 @@ func (t *Worker) Run(ctx context.Context) error {
 	// the spans raised beneath it have ended.
 	t.turnTrace.EndConversation()
 
+	t.cancelChildren(pipeCtx)
+
 	t.mu.Lock()
 	t.finished = true
 	t.mu.Unlock()
 	return runErr
+}
+
+// cancelChildren cancels the children once this worker's pipeline is over.
+//
+// A pipeline that ends on its own (an EndFrame it queued itself, an idle
+// timeout, a fatal error) is never told to end over the bus, so nothing has
+// passed the end on to its children. A child that has already finished takes no
+// notice.
+func (t *Worker) cancelChildren(ctx context.Context) {
+	t.PropagateCancelToChildren(ctx, t.Name()+" finished")
 }
 
 // runLoop sends the StartFrame, waits for the pipeline to be ready, then pushes

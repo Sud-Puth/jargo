@@ -144,3 +144,36 @@ func TestRunnerCancelsTheWorkerOnASignal(t *testing.T) {
 		}
 	}
 }
+
+// TestRunnerEndsWhenAParentWorkerEndsOnItsOwn covers a root worker whose
+// pipeline ends by itself, through an EndFrame it queued rather than an end
+// sent over the bus. Nothing told its child to end, so the child ran on and the
+// runner, which waits for every worker, never returned. The parent cancels its
+// children as it finishes.
+func TestRunnerEndsWhenAParentWorkerEndsOnItsOwn(t *testing.T) {
+	t.Parallel()
+	noSignals := false
+	r := workers.NewRunner(workers.RunnerConfig{HandleInterrupt: &noSignals})
+	parent, ready, _ := runnerWorker()
+
+	childReady := make(chan struct{})
+	var once sync.Once
+	child := pipeline.NewWorker(pipeline.New(newEcho()), pipeline.WorkerConfig{
+		Name:        "child",
+		IdleTimeout: -1,
+	})
+	events.On(child.Events(), pipeline.EventPipelineStarted,
+		func(_ context.Context, _ *frames.StartFrame) { once.Do(func() { close(childReady) }) })
+
+	done := runUnderRunner(t.Context(), t, r, parent)
+	awaitClosed(t, ready, "the parent pipeline starting")
+	parent.AddWorkers(t.Context(), child)
+	awaitClosed(t, childReady, "the child pipeline starting")
+
+	parent.StopWhenDone()
+	awaitClosed(t, done, "the run returning")
+
+	if !child.HasFinished() {
+		t.Error("the child is still running after its parent finished")
+	}
+}
