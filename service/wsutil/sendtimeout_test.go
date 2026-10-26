@@ -126,3 +126,23 @@ func TestSendTimeoutCanBeTurnedOff(t *testing.T) {
 		t.Errorf("send timeout = %s, want none", c.sendTimeout)
 	}
 }
+
+// TestRefusedHandshakeKeepsTheResponseHeader checks a refusal carries the
+// header of the response that refused it, where a provider may explain why.
+func TestRefusedHandshakeKeepsTheResponseHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Reason", "bad setting")
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := Dial(t.Context(), "ws"+strings.TrimPrefix(srv.URL, "http"), nil, 0)
+
+	he, ok := errors.AsType[*HandshakeError](err)
+	if !ok {
+		t.Fatalf("error = %v, want a refused handshake", err)
+	}
+	if got := he.Header.Get("X-Reason"); got != "bad setting" {
+		t.Errorf("X-Reason = %q, want the refusing response's header", got)
+	}
+}

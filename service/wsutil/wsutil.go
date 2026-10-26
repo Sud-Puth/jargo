@@ -114,6 +114,9 @@ func (c *Conn) SetCloseTimeout(d time.Duration) {
 type HandshakeError struct {
 	// StatusCode is the HTTP status the server refused the handshake with.
 	StatusCode int
+	// Header is the header of the response that refused the handshake, where a
+	// provider may explain the refusal.
+	Header http.Header
 	// Err is the underlying dial failure.
 	Err error
 }
@@ -168,8 +171,10 @@ func Adopt(conn *websocket.Conn, readLimit int64) *Conn {
 func Dial(ctx context.Context, url string, header http.Header, readLimit int64) (*Conn, error) {
 	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: header})
 	status := 0
+	var respHeader http.Header
 	if resp != nil {
 		status = resp.StatusCode
+		respHeader = resp.Header
 		if resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -177,7 +182,7 @@ func Dial(ctx context.Context, url string, header http.Header, readLimit int64) 
 	if err != nil {
 		err = redactDialError(err)
 		if status != 0 {
-			return nil, &HandshakeError{StatusCode: status, Err: err}
+			return nil, &HandshakeError{StatusCode: status, Header: respHeader, Err: err}
 		}
 		return nil, err
 	}

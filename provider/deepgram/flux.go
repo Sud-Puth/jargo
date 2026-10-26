@@ -449,7 +449,7 @@ func (c *fluxConnector) Connect(ctx context.Context, sampleRate int) (stt.Stream
 
 	conn, err := wsutil.Dial(ctx, c.cfg.ListenURL+"?"+q.Encode(), header, 0)
 	if err != nil {
-		return nil, fmt.Errorf("deepgram flux: dial: %w", err)
+		return nil, dialError("deepgram flux", err)
 	}
 	s := &fluxStream{
 		conn:        conn,

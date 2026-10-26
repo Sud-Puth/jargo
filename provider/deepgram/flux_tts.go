@@ -169,7 +169,7 @@ func (s *fluxSynth) RunTTS(ctx context.Context, text, _ string, yield func(f fra
 
 	conn, err := wsutil.Dial(ctx, s.cfg.SpeakURL+"?"+q.Encode(), header, fluxTTSReadLimit)
 	if err != nil {
-		return fmt.Errorf("deepgram flux tts: dial: %w", err)
+		return dialError("deepgram flux tts", err)
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
