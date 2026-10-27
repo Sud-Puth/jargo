@@ -10,6 +10,8 @@ import (
 	"github.com/gojargo/jargo/internal/onnxrt"
 )
 
+var errConfidenceMismatch = errors.New("vad: confidence mismatch")
+
 // toneFrames builds n frames of 512 mono 16-bit samples of a continuous 300 Hz
 // sine at amplitude 0.5; silenceFrames builds n frames of zeros.
 func toneFrames(n int) [][]byte {
@@ -213,7 +215,7 @@ func TestSileroSharedModelConcurrency(t *testing.T) {
 	toneWant := []float64{0.002657, 0.001875, 0.001425, 0.001144, 0.000907, 0.000863, 0.000693, 0.000712}
 
 	errs := make(chan error, numWorkers)
-	for w := 0; w < numWorkers; w++ {
+	for range numWorkers {
 		go func() {
 			s, err := NewSilero(WithModel(model))
 			if err != nil {
@@ -231,7 +233,7 @@ func TestSileroSharedModelConcurrency(t *testing.T) {
 			for i, frame := range frames {
 				got := s.voiceConfidence(frame)
 				if math.Abs(got-toneWant[i]) > tol {
-					errs <- fmt.Errorf("frame %d confidence = %v, want %v", i, got, toneWant[i])
+					errs <- fmt.Errorf("%w: frame %d confidence = %v, want %v", errConfidenceMismatch, i, got, toneWant[i])
 					return
 				}
 			}
@@ -239,7 +241,7 @@ func TestSileroSharedModelConcurrency(t *testing.T) {
 		}()
 	}
 
-	for w := 0; w < numWorkers; w++ {
+	for range numWorkers {
 		if err := <-errs; err != nil {
 			t.Errorf("worker failed: %v", err)
 		}

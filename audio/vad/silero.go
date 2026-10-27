@@ -70,7 +70,8 @@ type Silero struct {
 }
 
 // SileroModel is a reusable ONNX session holding the loaded Silero VAD model.
-// It must outlive any analyzers built from it.
+// It must outlive any analyzers built from it. Streams sharing a model run
+// inference sequentially one at a time.
 type SileroModel struct {
 	session *onnxrt.Session
 }
